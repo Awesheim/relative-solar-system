@@ -1,0 +1,3000 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Solar Scale</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="sun-objects.js"></script>
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;500;600;700&family=TASA+Orbiter+Display:wght@500;600&display=swap" rel="stylesheet" />
+
+<style>
+  :root {
+    /* Figma palette */
+    --bg-0:        rgb(0, 0, 0);
+    --border:      rgb(100, 100, 100);
+    --fg-0:        rgb(226, 226, 226);
+    --highlight:   rgb(240, 214, 104);   /* yellow accent */
+    --fg-dim:      rgb(183, 183, 183);
+    --fg-dim-2:    rgb(82, 82, 82);
+    --bg-1:        rgb(28, 28, 28);
+    --earth:       rgb(131, 166, 255);
+    --voyager:     rgb(151, 71, 255);    /* fig: stroke colour, but we want gold */
+    --voyager-gold: rgb(240, 214, 104);
+    --display: "TASA Orbiter Display", "TASA Orbiter", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --mono: "Roboto Mono", ui-monospace, Menlo, Monaco, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--bg-0); color: var(--fg-0); font-family: var(--mono); -webkit-font-smoothing: antialiased; }
+
+  /* Cap the UI chrome (header/footer/playback/drawer) to a max width on
+     ultra-wide screens, centered — but NOT the map, which stays full-bleed
+     behind it. Chrome children re-enable their own pointer-events. */
+  #stage { position: absolute; inset: 0; max-width: 1920px; margin: 0 auto; pointer-events: none; }
+  /* Only opt in children that don't already manage their own pointer-events
+     opt-in pattern (.header/.footer use "> *" to keep their own empty area
+     click-through, so must NOT be blanket-overridden here). */
+  #stage > .playback, #stage > .drawer-backdrop, #stage > .drawer { pointer-events: auto; }
+
+  /* ─── Map ─── */
+  #map { position: absolute; inset: 0; background: var(--bg-0); cursor: crosshair; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+  #map.scaling { cursor: nwse-resize; }
+  #map.pan-mode { cursor: grab; }
+  #map.pan-mode.dragging { cursor: grabbing; }
+  #map.pan-mode .leaflet-grab,
+  #map.pan-mode .leaflet-grab * { cursor: grab !important; }
+  #map.pan-mode.dragging .leaflet-grab,
+  #map.pan-mode.dragging .leaflet-grab * { cursor: grabbing !important; }
+  /* Dark Matter tiles — already low-contrast.  Strip remaining saturation, drop
+     brightness so buildings/water read as uniform dark fields. */
+  .leaflet-tile-pane { filter: grayscale(1) brightness(1.25) contrast(1.05); }
+  .leaflet-container { background: rgb(5, 6, 8); outline: none; }
+  .leaflet-control-attribution {
+    background: transparent !important;
+    color: rgb(82, 82, 82) !important;
+    font-family: var(--mono);
+    font-size: 10px !important;
+    padding: 2px 6px !important;
+    border: none;
+  }
+  .leaflet-control-attribution a { color: var(--fg-dim) !important; }
+  .leaflet-control-zoom { display: none !important; }
+
+  /* ─── Header (top) ─── */
+  .header {
+    position: absolute;
+    top: 48px;
+    left: 48px;
+    right: 48px;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    pointer-events: none;
+    z-index: 665;
+  }
+  .header > * { pointer-events: auto; }
+  /* Title + info text slide aside when the drawer opens, trailing it by 100ms. */
+  .header-left {
+    transition: transform 260ms cubic-bezier(.4,0,.2,1) 20ms;
+  }
+  .header-left.shifted { transform: translateX(-160px); }
+
+  .wordmark {
+    font-family: var(--display);
+    font-weight: 500;
+    font-size: 48px;
+    line-height: 1.06;
+    color: var(--fg-0);
+    letter-spacing: -0.01em;
+    margin: 0;
+    user-select: none;
+  }
+  .wordmark .l2 { display: block; }
+
+  /* Info text — three lines: size / location / date */
+  .scale-sentence {
+    position: relative;
+    margin-top: 6px;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.44;
+    color: var(--fg-dim);
+    max-width: 340px;
+    text-wrap: pretty;
+  }
+  .ss-line { display: block; white-space: nowrap; }
+  .ss-link {
+    color: var(--highlight);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
+  }
+  /* Playback control — a single combined play/speed button. On desktop it
+     sits at the left margin, vertically centered on the viewport. */
+  .playback {
+    position: absolute;
+    top: 50%;
+    left: 48px;
+    transform: translateY(-50%);
+    z-index: 660;
+    display: flex;
+    align-items: center;
+  }
+  .transport-btn {
+    position: relative;
+    display: flex;
+    align-items: center;
+    background: transparent;
+    border: none;
+    appearance: none;
+    -webkit-appearance: none;
+    padding: 8px;
+    margin: -8px;
+    cursor: pointer;
+    gap: 0;
+    transition: gap 200ms ease;
+  }
+  .transport-btn[data-state="1"],
+  .transport-btn[data-state="2"] {
+    gap: 2px;
+  }
+  /* Slot 1 is always present at fixed size; slot 2 grows in from 0 width,
+     "spawning" alongside a slide-in of its triangle. */
+  .tri-slot {
+    position: relative;
+    width: 14px;
+    height: 16px;
+    flex: none;
+  }
+  .tri-slot-2 {
+    width: 0;
+    overflow: hidden;
+    transition: width 200ms ease;
+  }
+  .transport-btn[data-state="1"] .tri-slot-2,
+  .transport-btn[data-state="2"] .tri-slot-2 {
+    width: 14px;
+  }
+  .tri {
+    position: absolute;
+    top: 0; left: 0;
+    width: 14px; height: 16px;
+    transition: opacity 200ms ease, transform 200ms ease;
+  }
+  .tri-slot-2 .tri { transform: translateX(-10px); }
+  .transport-btn[data-state="1"] .tri-slot-2 .tri,
+  .transport-btn[data-state="2"] .tri-slot-2 .tri {
+    transform: translateX(0);
+  }
+  /* Playing speed 2 hover: slide the two triangles 2px toward each other so
+     the bars they morph into land exactly 10px apart. */
+  .transport-btn[data-state="2"]:hover:not(.settle) .tri-slot .tri {
+    transform: translateX(2px);
+  }
+  .transport-btn[data-state="2"]:hover:not(.settle) .tri-slot-2 .tri {
+    transform: translateX(-2px);
+  }
+  /* The slot's overflow:hidden (needed for its width-reveal spawn-in) would
+     otherwise clip the bar once it's translated left of the slot's bounds. */
+  .transport-btn[data-state="2"]:hover:not(.settle) .tri-slot-2 {
+    overflow: visible;
+  }
+  .tri-outline {
+    position: absolute;
+    top: 0; left: 0;
+    width: 14px; height: 16px;
+    transition: opacity 200ms ease;
+  }
+  .tri-outline polygon { fill: none; stroke: var(--highlight); stroke-width: 1; }
+  /* Fill is a shape-clipped div (not an SVG polygon) so its outline can
+     morph smoothly from a triangle into a pause bar: both are defined as
+     4-point polygons with matching vertex order, so the browser tweens
+     each corner instead of cutting or crossfading between shapes. */
+  .tri-fill {
+    position: absolute;
+    top: 0; left: 0;
+    width: 14px; height: 16px;
+    clip-path: inset(0 100% 0 0);
+    transition: clip-path 200ms ease;
+  }
+  .tri-fill-shape {
+    position: absolute;
+    inset: 0;
+    background: var(--highlight);
+    clip-path: polygon(1px 1px, 13px 8px, 13px 8px, 1px 15px);
+    transition: clip-path 250ms ease;
+  }
+  /* Default hover (stopped): first triangle fills partway. */
+  .transport-btn[data-state="0"]:hover:not(.settle) #tri1 .tri-fill {
+    clip-path: inset(0 65% 0 0);
+  }
+  /* Playing speed 1: first triangle fully filled, second spawns as outline. */
+  .transport-btn[data-state="1"] #tri1 .tri-fill { clip-path: inset(0 0 0 0); }
+  .transport-btn[data-state="1"]:hover:not(.settle) #tri2 .tri-fill {
+    clip-path: inset(0 65% 0 0);
+  }
+  /* Playing speed 2: both triangles fully filled. */
+  .transport-btn[data-state="2"] #tri1 .tri-fill,
+  .transport-btn[data-state="2"] #tri2 .tri-fill {
+    clip-path: inset(0 0 0 0);
+  }
+  /* Playing speed 2 hover: the outline fades, and the fill triangle morphs
+     into a thin vertical bar — the two bars together read as a pause icon. */
+  .transport-btn[data-state="2"]:hover:not(.settle) .tri-outline {
+    opacity: 0;
+  }
+  .transport-btn[data-state="2"]:hover:not(.settle) .tri-fill-shape {
+    clip-path: polygon(1px 0px, 3px 0px, 3px 16px, 1px 16px);
+  }
+
+  /* Location/date editor popover — black, 2px corners */
+  .ss-pop {
+    display: none;
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 0;
+    width: 300px;
+    background: rgba(0, 0, 0, 0.75);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    border: 1px solid #121212;
+    border-radius: 2px;
+    padding: 10px 12px;
+    z-index: 750;
+  }
+  .ss-pop.open { display: block; }
+  .loc-input {
+    width: 100%;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--border);
+    color: var(--fg-0);
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.4;
+    padding: 2px 0 6px;
+    outline: none;
+  }
+  .loc-input:focus { border-color: var(--highlight); }
+  .loc-input::placeholder { color: var(--fg-dim-2); }
+  .loc-results { display: none; max-height: 240px; overflow-y: auto; margin-top: 8px; }
+  .loc-results.open { display: block; }
+  /* Date-parse preview reuses the same hidden-until-populated box model as
+     .loc-results so both popovers are the exact same height when idle. */
+  .date-status-wrap { display: none; margin-top: 8px; }
+  .date-status-wrap.open { display: block; }
+  .loc-result {
+    padding: 5px 0;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--fg-0);
+    cursor: pointer;
+  }
+  .loc-result:hover { color: var(--highlight); }
+  .loc-result .sub { display: block; font-size: 11px; color: var(--fg-dim); }
+  .loc-status {
+    padding: 5px 0;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--fg-dim);
+  }
+
+  /* Custom calendar date picker \u2014 matches app's mono/dark aesthetic instead
+     of the OS-native <input type="date">. */
+  .cal-pop { width: 260px; }
+  .cal-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .cal-nav {
+    background: transparent;
+    border: none;
+    color: var(--fg-dim);
+    font-family: var(--mono);
+    font-size: 16px;
+    line-height: 1;
+    padding: 2px 8px;
+    cursor: pointer;
+  }
+  .cal-nav:hover { color: var(--highlight); }
+  .cal-title {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--fg-0);
+  }
+  .cal-year {
+    color: var(--fg-dim);
+    cursor: pointer;
+  }
+  .cal-year:hover { color: var(--highlight); }
+  .cal-year-input {
+    display: none;
+    width: 58px;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--highlight);
+    color: var(--fg-0);
+    font-family: var(--mono);
+    font-size: 13px;
+    text-align: center;
+    outline: none;
+    -moz-appearance: textfield;
+  }
+  .cal-year-input.open { display: inline-block; }
+  .cal-year-input::-webkit-outer-spin-button,
+  .cal-year-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .cal-weekdays {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    text-align: center;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--fg-dim-2);
+    margin-bottom: 4px;
+  }
+  .cal-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 2px;
+  }
+  .cal-day {
+    aspect-ratio: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--fg-0);
+    background: transparent;
+    border: none;
+    border-radius: 2px;
+    cursor: pointer;
+  }
+  .cal-day:hover { color: var(--highlight); }
+  .cal-day.other-month { color: var(--fg-dim-2); }
+  .cal-day.today { box-shadow: inset 0 0 0 1px var(--fg-dim); }
+  .cal-day.selected { background: var(--highlight); color: #000; font-weight: 600; }
+  .cal-day.out-of-range { color: var(--fg-dim-2); opacity: 0.3; cursor: default; pointer-events: none; }
+  .cal-today {
+    margin-top: 10px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--fg-dim);
+    text-align: center;
+    cursor: pointer;
+  }
+  .cal-today:hover { color: var(--highlight); }
+
+  /* Toggle group (top-right) */
+  .toggles {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    align-items: flex-start;
+  }
+  /* Background (matches the hover-card styling) shown only while hovering
+     the whole toggle group, not per-row. */
+  .toggles::before {
+    content: "";
+    position: absolute;
+    top: -16px; bottom: -16px; left: -16px; right: -16px;
+    background: transparent;
+    border-radius: 2px;
+    opacity: 0;
+    transition: opacity 150ms, background 150ms;
+    pointer-events: none;
+    z-index: -1;
+  }
+  .toggles:hover::before {
+    background: rgba(0, 0, 0, 0.15);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    opacity: 1;
+  }
+  .toggle-row {
+    display: inline-flex;
+    align-items: center;
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--fg-0);
+    user-select: none;
+    white-space: nowrap;
+  }
+  .toggle-row input { display: none; }
+
+  /* ── Toggle icon: a vertical stroke riding across a fixed horizontal
+     stroke — off (left, resembles a switch-off), hover (centre, a plus),
+     on (right, a switch-on), on-hover (right, faded to a minus). */
+  .ti {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    width: 20px;
+    height: 20px;
+    margin-right: 16px;
+    flex: none;
+  }
+  .ti-line-h {
+    position: absolute;
+    left: 0; top: 50%;
+    transform: translateY(-50%);
+    width: 20px; height: 1px;
+    background: var(--highlight);
+    transition: transform 150ms cubic-bezier(.34, 1.4, .64, 1);
+  }
+  .ti-line-v {
+    position: absolute;
+    left: 0; top: 50%;
+    transform: translateY(-50%);
+    width: 1px; height: 20px;
+    background: var(--highlight);
+    opacity: 1;
+    transition: left 150ms cubic-bezier(.34, 1.4, .64, 1), transform 150ms cubic-bezier(.34, 1.4, .64, 1);
+  }
+  .toggle-row:hover input:not(:checked) ~ .ti .ti-line-v { left: calc(50% - 0.5px); }
+  .toggle-row input:checked ~ .ti .ti-line-v { left: 19px; }
+  /* On-state hover: both strokes rotate 45° and the moving stroke recentres,
+     so the two together read as an X instead of fading away. */
+  .toggle-row:hover input:checked ~ .ti .ti-line-v {
+    left: calc(50% - 0.5px);
+    transform: translateY(-50%) rotate(45deg);
+  }
+  .toggle-row:hover input:checked ~ .ti .ti-line-h {
+    transform: translateY(-50%) rotate(45deg);
+  }
+  /* Right after a click, hold the icon at its new resting state — no
+     hover-preview — until the pointer actually leaves and re-enters. */
+  .toggle-row.settle:hover input:not(:checked) ~ .ti .ti-line-v { left: 0; opacity: 1; }
+  .toggle-row.settle:hover input:checked ~ .ti .ti-line-v { left: 19px; transform: translateY(-50%); }
+  .toggle-row.settle:hover input:checked ~ .ti .ti-line-h { transform: translateY(-50%); }
+  /* Touch has no real hover, but many mobile browsers still apply :hover
+     briefly on tap \u2014 which played the hover-preview animation before the
+     tap's actual on/off change. Neutralize all :hover previews on touch so
+     a tap animates straight to its resting on/off state. */
+  @media (hover: none) {
+    .toggle-row:hover input:not(:checked) ~ .ti .ti-line-v { left: 0; }
+    .toggle-row:hover input:checked ~ .ti .ti-line-v { left: 19px; transform: translateY(-50%); }
+    .toggle-row:hover input:checked ~ .ti .ti-line-h { transform: translateY(-50%); }
+  }
+
+  .toggle-label {
+    color: var(--fg-0);
+    transition: color 150ms cubic-bezier(.34, 1.4, .64, 1);
+  }
+
+  /* ─── Footer (bottom) ─── */
+  .footer {
+    position: absolute;
+    bottom: 48px;
+    left: 48px;
+    right: 48px;
+    display: flex;
+    align-items: flex-end;
+    z-index: 701;
+    pointer-events: none;
+  }
+  .footer > * { pointer-events: auto; }
+
+  /* Bottom-center: sun-diameter slider */
+  .slider-wrap {
+    --sw-gutter: 80px;
+    flex: 1;
+    max-width: 800px;
+    margin: 0 auto;
+    touch-action: none;
+    position: relative;
+    height: 24px;
+  }
+  .slider-track {
+    position: absolute;
+    left: var(--sw-gutter);
+    right: var(--sw-gutter);
+    top: 50%;
+    height: 1px;
+    background: var(--fg-dim);
+    transform: translateY(-50%);
+  }
+  .ep-dot {
+    position: absolute;
+    top: 50%;
+    width: 8px;
+    height: 8px;
+    border: 1px solid var(--fg-dim);
+    border-radius: 50%;
+    background: var(--bg-0);
+    transform: translate(-50%, -50%);
+  }
+  .ep-dot.start { left: var(--sw-gutter); }
+  .ep-dot.end   { left: auto; right: var(--sw-gutter); transform: translate(50%, -50%); }
+  .ep-text {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    font-family: var(--mono);
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--fg-0);
+    white-space: nowrap;
+    transition: opacity 240ms;
+    pointer-events: none;
+  }
+  .ep-text.start { right: calc(100% - var(--sw-gutter) + 16px); }
+  .ep-text.end   { left:  calc(100% - var(--sw-gutter) + 16px); }
+
+  /* Handle — sits absolutely over the track at currentLeft */
+  .slider-handle {
+    position: absolute;
+    top: 50%;
+    left: 0;
+    width: 101px;            /* anchor block width (matches figma) */
+    height: 74px;            /* "Sun diameter" + circle + "50 m" */
+    margin-left: -50.5px;
+    margin-top: -37px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 4px;
+    cursor: grab;
+    user-select: none;
+  }
+  .slider-handle.dragging { cursor: grabbing; }
+  .slider-handle .top-lbl {
+    font-family: var(--mono);
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--highlight);
+    height: 21px;
+    white-space: nowrap;
+  }
+  .slider-handle .circle {
+    position: relative;
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .slider-handle .circle::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border: 1px solid var(--fg-dim);
+    border-radius: 50%;
+    background: var(--bg-0);
+  }
+  .slider-handle .circle::after {
+    content: "";
+    position: relative;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--highlight);
+    transition: width 140ms cubic-bezier(.4,0,.2,1), height 140ms cubic-bezier(.4,0,.2,1);
+  }
+  .slider-handle.hover .circle::after,
+  .slider-handle.dragging .circle::after {
+    width: 18px;
+    height: 18px;
+  }
+  .slider-handle .bot-lbl {
+    font-family: var(--mono);
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--fg-0);
+    height: 21px;
+    text-align: center;
+    white-space: nowrap;
+  }
+
+  /* ─── In-map labels ─── */
+  .ms-icon { background: transparent; border: none; pointer-events: none; }
+
+  /* Permanent name label for star-comparison rings. */
+  .star-mark {
+    position: relative;
+    transform: translate(-50%, -100%);
+    pointer-events: auto;
+    cursor: help;
+    padding: 0 4px;
+  }
+  .star-mark .name {
+    display: block;
+    font: 500 12px/1.5 var(--mono);
+    color: var(--fg-0);
+    white-space: nowrap;
+    
+  }
+  .star-mark .dist {
+    display: block;
+    font: 400 12px/1.5 var(--mono);
+    color: var(--fg-dim);
+    white-space: nowrap;
+    
+    opacity: 0;
+    transition: opacity 120ms;
+    pointer-events: none;
+  }
+  .star-mark:hover .dist { opacity: 1; }
+
+  /* Proxima Centauri marker — a small filled dot; its card is the shared
+     cursor-tracked hover-card (like planets/stars/voyagers/Halley). */
+  .proxima-mark { cursor: help; }
+
+  /* Hover-revealed body card — black backdrop, no table. Just a name and a
+     few stacked map-scale values. The object's shape/colour sits half
+     outside the frame on the left, vertically centred on the name.
+     Anchored to the cursor (offset right so the shape clears it). */
+  .hc {
+    position: relative;
+    display: inline-flex;
+    flex-direction: column;
+    gap: 2px;
+    /* Horizontal: shift right so the shape (which sits half outside the
+       frame's own left edge) lands exactly on the anchor point. Vertical:
+       a fixed pixel offset (padding-top + half the name's line box) so the
+       shape stays centred on the name regardless of how many rows follow
+       it \u2014 not -50% of the whole card, which drifts as rows are added. */
+    transform: translate(0, -20.3px);
+    pointer-events: none;
+    background: rgba(0, 0, 0, 0.15);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    padding: 8px 8px 8px 24px;
+    border-radius: 2px;
+  }
+  /* Belt-and-suspenders: nothing inside the label should ever be able to
+     intercept a click meant for the orbit/body underneath it. */
+  .hc, .hc * { pointer-events: none; }
+  .hc-name {
+    position: relative;
+    font-family: var(--display); font-weight: 600; font-size: 22px; line-height: 1.12;
+    color: var(--fg-0); white-space: nowrap;
+  }
+  .hc-tag { font-family: var(--mono); font-weight: 400; font-size: 12px; color: var(--fg-dim); margin-left: 8px; }
+  .hc-row { font-family: var(--mono); font-weight: 400; font-size: 12px; line-height: 1.5; color: var(--fg-0); white-space: nowrap; }
+  .hc-real { color: var(--fg-dim); }
+  /* Object shape — 32x32, half outside the frame's left edge, centred on
+     the name line vertically. */
+  .hc-shape {
+    position: absolute;
+    left: -24px;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: 32px; height: 32px;
+    display: flex; align-items: center; justify-content: center;
+    pointer-events: none;
+  }
+  .hc-shape .hc-circle { width: 32px; height: 32px; border-radius: 50%; }
+  .hc-shape .hc-ring { width: 30px; height: 30px; border-radius: 50%; border: 2px solid; box-sizing: border-box; }
+  .hc-shape .hc-diamond { width: 22px; height: 22px; transform: rotate(45deg); }
+  .hc-shape svg { display: block; overflow: visible; }
+
+  /* Voyager marker — 8×8 gray square. Card is a shared cursor-tracked
+     label (like planets), revealed by hovering the marker OR its path. */
+  .voyager-mark {
+    position: relative;
+    width: 8px;
+    height: 8px;
+    background: var(--fg-dim);
+    transform: translate(-4px, -4px);
+    cursor: default;
+    pointer-events: auto;
+  }
+
+  /* Halley's Comet — a V (point toward the Sun). Card is the same shared
+     cursor-tracked label, revealed by hovering the marker OR its orbit. */
+  .halley-mark { position: relative; width: 0; height: 0; cursor: default; pointer-events: auto; }
+  .halley-mark .v {
+    position: absolute; left: 0; top: 0; width: 24px; height: 24px;
+    margin: -12px 0 0 -12px; transform-origin: center center;
+    filter: drop-shadow(0 0 3px rgba(0,0,0,0.9)); pointer-events: auto;
+  }
+
+  /* Sun gets a soft golden halo. CSS drop-shadow on the SVG path is GPU-
+     accelerated and only re-computes when we re-render. */
+  .sun-disc {
+    filter: drop-shadow(0 0 28px rgba(240, 214, 104, 0.55))
+            drop-shadow(0 0 8px rgba(240, 214, 104, 0.85));
+  }
+
+  /* Subtle compact tooltip on hover */
+  .leaflet-tooltip.planet-tip {
+    background: var(--bg-0);
+    border: 1px solid var(--border);
+    border-radius: 0;
+    color: var(--fg-0);
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 6px 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    white-space: nowrap;
+  }
+  .leaflet-tooltip.planet-tip::before { display: none; }
+
+  /* Attribution sits in the 48px margin band below the footer */
+  .leaflet-bottom.leaflet-right { bottom: 0 !important; }
+
+  /* Sun handle (the actual sun on the map) */
+  .sun-marker { background: transparent; border: none; pointer-events: none; }
+
+  /* Tweaks panel (host-toggled) — keeps the host toolbar in sync. Hidden by default. */
+  .tweaks-panel {
+    position: absolute;
+    right: 48px;
+    top: 200px;
+    background: var(--bg-0);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    z-index: 700;
+    display: none;
+    flex-direction: column;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--fg-dim);
+    min-width: 220px;
+  }
+  .tweaks-panel.open { display: flex; }
+  .tweaks-panel .head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    color: var(--fg-0);
+    font-weight: 500;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    font-size: 11px;
+    margin-bottom: 4px;
+  }
+  .tweaks-panel .x { cursor: pointer; color: var(--fg-dim); }
+  .tweaks-panel .x:hover { color: var(--fg-0); }
+  .tweaks-panel .hint { line-height: 1.5; }
+
+  /* ─── Hamburger + drawer (mobile only) ─── */
+  .hamburger {
+    display: none;
+    position: absolute;
+    top: 20px;
+    right: 20px;
+    z-index: 650;
+    width: 42px;
+    height: 42px;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 5px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    pointer-events: auto;
+  }
+  .hamburger span {
+    display: block;
+    width: 18px;
+    height: 1.5px;
+    background: var(--fg-0);
+    transition: transform 200ms cubic-bezier(.4,0,.2,1), opacity 160ms;
+  }
+  .hamburger.open span:nth-child(1) { transform: translateY(6.5px) rotate(45deg); }
+  .hamburger.open span:nth-child(2) { opacity: 0; }
+  .hamburger.open span:nth-child(3) { transform: translateY(-6.5px) rotate(-45deg); }
+
+  .drawer-backdrop {
+    display: none;
+    position: absolute;
+    inset: 0;
+    background: transparent;
+    z-index: 690;
+  }
+  .drawer-backdrop.open { display: block; }
+
+  .drawer {
+    position: absolute;
+    top: 0;
+    right: 0;
+    height: 100%;
+    width: 160px;
+    max-width: 86vw;
+    background: transparent;
+    z-index: 700;
+    transform: translateX(100%);
+    transition: transform 260ms cubic-bezier(.4,0,.2,1);
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+  .drawer.open { transform: translateX(0); }
+  .drawer-head {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding: 18px 12px 4px;
+  }
+  .drawer-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    padding: 4px;
+    color: var(--fg-dim);
+    cursor: pointer;
+    line-height: 1;
+  }
+  .drawer-close svg { width: 16px; height: 16px; display: block; }
+  .drawer-close:hover { color: var(--fg-0); }
+  .drawer-section {
+    padding: 18px 20px 18px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .drawer-section-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--fg-dim);
+  }
+
+  /* Drawer-hosted control overrides */
+  /* Drawer-hosted control overrides. Left/right padding here (combined with
+     drawer-section's own 12/20) puts the toggle rows 24px inside each edge
+     of the hover background below: background sits at drawer-left+24 on
+     the left and drawer-right (0) on the right, so content needs
+     drawer-left+48 / drawer-right-24 \u2014 i.e. +36 / +4 on top of
+     drawer-section's 12 / 20. */
+  .drawer .toggles { display: flex; flex-direction: column; align-items: stretch; gap: 26px; padding-left: 36px; padding-right: 4px; }
+  .drawer .toggle-row { justify-content: flex-start; width: 100%; }
+  .drawer .toggle-label { white-space: nowrap; }
+  /* On mobile the hover background always shows (touch has no persistent
+     hover) and spans the full page margin (edges); left/right/vertical
+     sizing is finalized in the mobile media query below, where the
+     drawer's fixed width is known. */
+  .drawer .toggles::before {
+    opacity: 1;
+    background: rgba(0, 0, 0, 0.15);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+  }
+
+  .drawer-credits {
+    margin-top: auto;
+    padding: 18px 20px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--fg-dim-2);
+    text-align: right;
+  }
+  .drawer-credits a { color: var(--fg-dim); text-decoration: none; }
+  .drawer-credits-line { display: block; }
+
+  /* Always-show distance sublabels where there is no hover (touch) */
+  @media (hover: none) {
+    .star-mark .dist { opacity: 1; }
+  }
+
+  /* ─── Mobile layout (≤768px) ─── */
+  @media (max-width: 768px) {
+    .header { top: 20px; left: 20px; right: 72px; }
+    .wordmark { font-size: 32px; }
+    /* Respect the mobile 20px page margin instead of desktop's 48px. */
+    .playback { left: 20px; }
+    .toggles { display: none; }       /* lives in the drawer on mobile */
+    /* iOS Safari auto-zooms the page when a tapped input's font-size is
+       below 16px — bump these two real <input> elements to 16px on mobile
+       only, so the date/location editors don't trigger an unwanted zoom. */
+    .loc-input, .cal-year-input { font-size: 16px; }
+    .cal-year-input { width: 68px; }
+    .hamburger {
+      display: flex;
+      /* visually align icon bars with the 20px page margins (button has
+         centring padding around the 18px-wide bars) */
+      top: 8px;
+      right: 8px;
+      z-index: 720;          /* stays above the drawer */
+    }
+    /* Map credits live in the menu on mobile instead of on the map. */
+    .leaflet-control-attribution { display: none !important; }
+    /* Toggles clear the hamburger/playback row at the top. */
+    .drawer-section { padding-top: 58px; }
+    /* Credits sit above the slider handle with ~8px clearance. */
+    .drawer-credits { padding-bottom: 84px; }
+    /* Drawer hugs its content width (auto) so it always fits the toggle
+       labels plus their insets, regardless of padding changes \u2014 capped by
+       max-width for very narrow screens. */
+    .drawer { width: max-content; max-width: 86vw; }
+    /* Toggle-group background: drop .toggles' own position:relative so the
+       pseudo-element's containing block becomes .drawer itself (already
+       position:fixed) instead \u2014 letting us anchor simply to the drawer's
+       own box (24px in from its left, flush to its right/top/bottom) rather
+       than computing fragile 100vw arithmetic. */
+    .drawer .toggles { position: static; }
+    .drawer .toggles::before {
+      position: absolute;
+      top: 0; bottom: 0;
+      left: 24px;
+      right: 0;
+    }
+
+    .footer {
+      left: 0;
+      right: 0;
+      bottom: 20px;
+      padding: 0 20px;
+    }
+    .slider-wrap {
+      --sw-gutter: 0px;     /* track spans full width within page margins */
+      margin: 0;
+    }
+    .slider-wrap .ep-text { display: none; }
+    .slider-wrap .ep-dot.start { transform: translate(0, -50%); }
+    .slider-wrap .ep-dot.end   { transform: translate(0, -50%); }
+    /* One-line handle label: «Sun XXX m» above the circle */
+    .slider-handle .top-lbl { display: none; }
+    .slider-handle .bot-lbl {
+      order: -1;            /* value moves above the circle */
+    }
+    .slider-handle .bot-lbl::before { content: "Sun "; }
+    .slider-handle { height: 56px; }
+  }
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div id="stage">
+
+<!-- ───── Header (top) ───── -->
+<header class="header">
+  <div class="header-left">
+    <h1 class="wordmark">Relative<span class="l2">solar system</span></h1>
+    <div class="scale-sentence" id="scaleSentence"><span class="ss-line">The Sun is the size of <span id="ssObj">a beach ball</span>,</span><span class="ss-line">Placed <span id="ssPrep">in</span> <span class="ss-link" id="ssLoc">Trondheim, Norway</span></span><span class="ss-line">on <span class="ss-link" id="ssDate">27 Sep 1985, 12:00</span>.</span>
+      <div class="ss-pop" id="ssPop">
+        <input class="loc-input" id="locInput" type="text" autocomplete="off" spellcheck="false"
+               placeholder="City, address, or coordinates" />
+        <div class="loc-results" id="locResults"></div>
+      </div>
+      <div class="ss-pop cal-pop" id="datePop">
+        <div class="cal-head">
+          <button class="cal-nav" id="calPrev" type="button" aria-label="Previous month">‹</button>
+          <div class="cal-title">
+            <span class="cal-month" id="calMonthLabel"></span>
+            <span class="cal-year" id="calYearLabel"></span>
+            <input class="cal-year-input" id="calYearInput" type="number" inputmode="numeric" min="1" max="10000" />
+          </div>
+          <button class="cal-nav" id="calNext" type="button" aria-label="Next month">›</button>
+        </div>
+        <div class="cal-weekdays"><span>S</span><span>M</span><span>T</span><span>W</span><span>T</span><span>F</span><span>S</span></div>
+        <div class="cal-grid" id="calGrid"></div>
+        <div class="cal-today" id="calToday">Today</div>
+      </div>
+    </div>
+  </div>
+  <div class="toggles">
+    <label class="toggle-row">
+      <input type="checkbox" id="tShowPlanets" />
+      <span class="ti" aria-hidden="true">
+        <span class="ti-line-h"></span>
+        <span class="ti-line-v"></span>
+      </span>
+      <span class="toggle-label">Planets</span>
+    </label>
+    <label class="toggle-row">
+      <input type="checkbox" id="tShowStars" />
+      <span class="ti" aria-hidden="true">
+        <span class="ti-line-h"></span>
+        <span class="ti-line-v"></span>
+      </span>
+      <span class="toggle-label">Star comparison</span>
+    </label>
+    <label class="toggle-row">
+      <input type="checkbox" id="tShowVoyagers" />
+      <span class="ti" aria-hidden="true">
+        <span class="ti-line-h"></span>
+        <span class="ti-line-v"></span>
+      </span>
+      <span class="toggle-label">Voyagers</span>
+    </label>
+    <label class="toggle-row">
+      <input type="checkbox" id="tShowHalley" />
+      <span class="ti" aria-hidden="true">
+        <span class="ti-line-h"></span>
+        <span class="ti-line-v"></span>
+      </span>
+      <span class="toggle-label">Halley's Comet</span>
+    </label>
+    <label class="toggle-row">
+      <input type="checkbox" id="tShowProxima" />
+      <span class="ti" aria-hidden="true">
+        <span class="ti-line-h"></span>
+        <span class="ti-line-v"></span>
+      </span>
+      <span class="toggle-label">Proxima Centauri</span>
+    </label>
+    <label class="toggle-row">
+      <input type="checkbox" id="tShowMapLabels" />
+      <span class="ti" aria-hidden="true">
+        <span class="ti-line-h"></span>
+        <span class="ti-line-v"></span>
+      </span>
+      <span class="toggle-label">Map labels</span>
+    </label>
+    <label class="toggle-row">
+      <input type="checkbox" id="tActualMetrics" />
+      <span class="ti" aria-hidden="true">
+        <span class="ti-line-h"></span>
+        <span class="ti-line-v"></span>
+      </span>
+      <span class="toggle-label">Actual metrics</span>
+    </label>
+  </div>
+</header>
+
+<!-- ───── Footer (bottom) ───── -->
+<footer class="footer">
+  <!-- bottom center: slider -->
+  <div class="slider-wrap" id="sliderWrap">
+    <div class="slider-track"></div>
+    <span class="ep-dot start"></span>
+    <span class="ep-dot end"></span>
+    <span class="ep-text start" id="epStartText">0.5 m</span>
+    <span class="ep-text end"   id="epEndText">1000 m</span>
+    <div class="slider-handle" id="sliderHandle">
+      <div class="top-lbl">Sun diameter</div>
+      <div class="circle"></div>
+      <div class="bot-lbl" id="handleValue">50 m</div>
+    </div>
+  </div>
+</footer>
+
+<!-- Playback lives at the top-right on mobile (beside the hamburger); on
+     desktop it moves to the left margin, vertically centered. -->
+<div class="playback">
+  <button class="transport-btn" id="transportBtn" data-state="0" aria-label="Play">
+    <span class="tri-slot">
+      <span class="tri" id="tri1">
+        <svg class="tri-outline" viewBox="0 0 14 16"><polygon points="1,1 1,15 13,8"/></svg>
+        <div class="tri-fill"><div class="tri-fill-shape"></div></div>
+      </span>
+    </span>
+    <span class="tri-slot tri-slot-2">
+      <span class="tri" id="tri2">
+        <svg class="tri-outline" viewBox="0 0 14 16"><polygon points="1,1 1,15 13,8"/></svg>
+        <div class="tri-fill"><div class="tri-fill-shape"></div></div>
+      </span>
+    </span>
+  </button>
+</div>
+
+<!-- Hamburger (mobile) -->
+<button class="hamburger" id="hamburger" aria-label="Open controls">
+  <span></span><span></span><span></span>
+</button>
+
+<!-- Mobile drawer -->
+<div class="drawer-backdrop" id="drawerBackdrop"></div>
+<aside class="drawer" id="drawer">
+  <div class="drawer-section" id="slotToggles"></div>
+  <div class="drawer-credits">
+    <span class="drawer-credits-line">© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors</span>
+    <span class="drawer-credits-line">© <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a></span>
+  </div>
+</aside>
+</div>
+
+<!-- Hidden Tweaks panel (controlled by host toolbar; keeps protocol working) -->
+<div class="tweaks-panel" id="tweaksPanel">
+  <div class="head">
+    <span>Tweaks</span>
+    <span class="x" id="tweaksClose">✕</span>
+  </div>
+  <div class="hint">
+    All controls are on screen. Toggle <em>Planets</em>, <em>Star comparison</em>,
+    <em>Voyagers</em>, <em>Halley's Comet</em> or <em>Proxima Centauri</em> from the top-right.
+  </div>
+</div>
+
+<script>
+/* ──────────────────────────────────────────────────────────────────────
+   Solar Scale v2
+   - Map kept (CARTO Dark Matter), 48px frame margin
+   - Chrome rebuilt per v3 annotations
+   - Persistent planet/star labels (tick + block)
+   - Moon + Pluto always on
+   - Voyager 1 + 2 dots with edge-arrows when off-screen
+   ────────────────────────────────────────────────────────────────────── */
+
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "showPlanets": true,
+  "showStars": false,
+  "showVoyagers": false,
+  "showHalley": false,
+  "showProxima": false,
+  "showMapLabels": false,
+  "showActualMetrics": false,
+  "sunDiameter": 8.045506352150225,
+  "lat": 63.430,
+  "lng": 10.395,
+  "locationName": "Trondheim, Norway",
+  "locationPrep": "in",
+  "orbitDate": "1992-03-16"
+}/*EDITMODE-END*/;
+
+let tweaks = { ...TWEAK_DEFAULTS };
+
+// ── Constants ───────────────────────────────────────────────────────
+const SUN_DIA_KM = 1391400;
+const AU_KM = 149597870.7;
+
+// Bodies — Moon + Pluto always on.  Pluto tagged as "dwarf".
+const BODIES = [
+  { key: "sun",     name: "Sun",     dia: 1391400, dist: 0,        color: "rgb(240,214,104)", kind: "star" },
+  { key: "mercury", name: "Mercury", dia: 4879,    dist: 57.9e6,   color: "rgb(160,160,160)", kind: "planet" },
+  { key: "venus",   name: "Venus",   dia: 12104,   dist: 108.2e6,  color: "rgb(230,184,115)", kind: "planet" },
+  { key: "earth",   name: "Earth",   dia: 12742,   dist: 149.6e6,  color: "rgb(131,166,255)", kind: "planet" },
+  { key: "moon",    name: "Moon",    dia: 3474,    dist: 149.6e6,  color: "rgb(180,180,188)", kind: "moon", parent: "earth", offset: 384400 },
+  { key: "mars",    name: "Mars",    dia: 6779,    dist: 227.9e6,  color: "rgb(192,57,43)",   kind: "planet" },
+  { key: "jupiter", name: "Jupiter", dia: 139820,  dist: 778.5e6,  color: "rgb(217,160,102)", kind: "planet" },
+  { key: "saturn",  name: "Saturn",  dia: 116460,  dist: 1434e6,   color: "rgb(232,213,138)", kind: "planet" },
+  { key: "uranus",  name: "Uranus",  dia: 50724,   dist: 2871e6,   color: "rgb(127,209,209)", kind: "planet" },
+  { key: "neptune", name: "Neptune", dia: 49244,   dist: 4495e6,   color: "rgb(44,91,184)",   kind: "planet" },
+  { key: "pluto",   name: "Pluto",   dia: 2376,    dist: 5906e6,   color: "rgb(170,170,170)", kind: "dwarf", tag: "(dwarf)" },
+];
+
+// ── Real heliocentric positions (JPL approximate Keplerian elements) ──
+// Elements + per-century rates referred to the J2000 ecliptic. Accurate to
+// ~arcminutes over 1800–2050. Per planet: a(AU) e I(°) L(°) peri ϖ(°)
+// node Ω(°), each with a "D" rate (per Julian century). Source: JPL SSD,
+// "Keplerian Elements for Approximate Positions of the Major Planets".
+const KEPLER = {
+  mercury:{a:0.38709927,e:0.20563593,I:7.00497902,L:252.25032350,peri:77.45779628,node:48.33076593, aD:0.00000037,eD:0.00001906,ID:-0.00594749,LD:149472.67411175,periD:0.16047689,nodeD:-0.12534081},
+  venus:  {a:0.72333566,e:0.00677672,I:3.39467605,L:181.97909950,peri:131.60246718,node:76.67984255, aD:0.00000390,eD:-0.00004107,ID:-0.00078890,LD:58517.81538729,periD:0.00268329,nodeD:-0.27769418},
+  earth:  {a:1.00000261,e:0.01671123,I:-0.00001531,L:100.46457166,peri:102.93768193,node:0.0, aD:0.00000562,eD:-0.00004392,ID:-0.01294668,LD:35999.37244981,periD:0.32327364,nodeD:0.0},
+  mars:   {a:1.52371034,e:0.09339410,I:1.84969142,L:-4.55343205,peri:-23.94362959,node:49.55953891, aD:0.00001847,eD:0.00007882,ID:-0.00813131,LD:19140.30268499,periD:0.44441088,nodeD:-0.29257343},
+  jupiter:{a:5.20288700,e:0.04838624,I:1.30439695,L:34.39644051,peri:14.72847983,node:100.47390909, aD:-0.00011607,eD:-0.00013253,ID:-0.00183714,LD:3034.74612775,periD:0.21252668,nodeD:0.20469106},
+  saturn: {a:9.53667594,e:0.05386179,I:2.48599187,L:49.95424423,peri:92.59887831,node:113.66242448, aD:-0.00125060,eD:-0.00050991,ID:0.00193609,LD:1222.49362201,periD:-0.41897216,nodeD:-0.28867794},
+  uranus: {a:19.18916464,e:0.04725744,I:0.77263783,L:313.23810451,peri:170.95427630,node:74.01692503, aD:-0.00196176,eD:-0.00004397,ID:-0.00242939,LD:428.48202785,periD:0.40805281,nodeD:0.04240589},
+  neptune:{a:30.06992276,e:0.00859048,I:1.77004347,L:-55.12002969,peri:44.96476227,node:131.78422574, aD:0.00026291,eD:0.00005105,ID:0.00035372,LD:218.45945325,periD:-0.32241464,nodeD:-0.00508664},
+  pluto:  {a:39.48211675,e:0.24882730,I:17.14001206,L:238.92903833,peri:224.06891629,node:110.30393684, aD:-0.00031596,eD:0.00005170,ID:0.00004818,LD:145.20780515,periD:-0.04062942,nodeD:-0.01183482},
+};
+const DEG = Math.PI / 180;
+function julianCenturies(date) { return (date.getTime() / 86400000 + 2440587.5 - 2451545.0) / 36525; }
+// Heliocentric ecliptic position: lon/lat in degrees, rAU in AU, rKm in km,
+// projKm = in-plane (ecliptic-projected) distance in km = rAU·cos(lat).
+function helioPos(key, date) {
+  const el = KEPLER[key];
+  if (!el) return null;
+  const T = julianCenturies(date);
+  const a = el.a + el.aD * T;
+  const e = el.e + el.eD * T;
+  const I = (el.I + el.ID * T) * DEG;
+  const L = el.L + el.LD * T;
+  const peri = el.peri + el.periD * T;
+  const node = el.node + el.nodeD * T;
+  const M = (((L - peri) % 360 + 540) % 360 - 180) * DEG;   // −180..180°
+  let E = M + e * Math.sin(M);
+  for (let i = 0; i < 12; i++) {
+    const dE = (E - e * Math.sin(E) - M) / (1 - e * Math.cos(E));
+    E -= dE; if (Math.abs(dE) < 1e-9) break;
+  }
+  const xp = a * (Math.cos(E) - e);
+  const yp = a * Math.sqrt(1 - e * e) * Math.sin(E);
+  const w = (peri - node) * DEG, om = node * DEG;
+  const cw = Math.cos(w), sw = Math.sin(w), co = Math.cos(om), so = Math.sin(om), ci = Math.cos(I), si = Math.sin(I);
+  const x = (cw * co - sw * so * ci) * xp + (-sw * co - cw * so * ci) * yp;
+  const y = (cw * so + sw * co * ci) * xp + (-sw * so + cw * co * ci) * yp;
+  const z = (sw * si) * xp + (cw * si) * yp;
+  const rAU = Math.sqrt(x * x + y * y + z * z);
+  const lon = ((Math.atan2(y, x) / DEG) % 360 + 360) % 360;
+  const lat = Math.asin(z / rAU) / DEG;
+  return { lon, lat, rAU, rKm: rAU * AU_KM, projKm: rAU * Math.cos(lat * DEG) * AU_KM };
+}
+// 3-D heliocentric ecliptic position (AU).
+function helioXYZ(key, date) {
+  const p = helioPos(key, date);
+  if (!p) return null;
+  const cl = Math.cos(p.lat * DEG);
+  return { x: p.rAU * cl * Math.cos(p.lon * DEG), y: p.rAU * cl * Math.sin(p.lon * DEG), z: p.rAU * Math.sin(p.lat * DEG) };
+}
+// Instantaneous heliocentric orbital speed (km/h), centred finite difference.
+function orbitalSpeedKmh(key, date) {
+  const dtH = 6, dtMs = dtH * 3600 * 1000;
+  const a = helioXYZ(key, new Date(date.getTime() - dtMs));
+  const b = helioXYZ(key, new Date(date.getTime() + dtMs));
+  if (!a || !b) return null;
+  const dAU = Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
+  return (dAU * AU_KM) / (2 * dtH);   // km per hour
+}
+// Format a real-space speed (km/h) with space-separated thousands.
+function fmtActualSpeed(kmh) {
+  return Math.round(kmh).toLocaleString("en").replace(/,/g, " ") + " km/h";
+}
+// Constant/instantaneous heliocentric speed (AU/yr) → km/h, for Voyager's
+// escape speed and Halley's vis-viva speed alike.
+function auYrToKmh(auYr) {
+  return auYr * AU_KM / (365.25 * 24);
+}
+// Format an on-map speed given in metres/hour, picking a human unit.
+function fmtMapSpeed(mPerH) {
+  const sig = (n) => n >= 100 ? Math.round(n).toLocaleString("en").replace(/,/g, " ")
+                   : n >= 10  ? n.toFixed(1) : n.toFixed(2);
+  if (mPerH >= 1000)  return sig(mPerH / 1000) + " km/h";
+  if (mPerH >= 1)     return sig(mPerH) + " m/h";
+  if (mPerH >= 0.01)  return sig(mPerH * 100) + " cm/h";
+  return sig(mPerH * 1000) + " mm/h";
+}
+// Projected (in-plane) orbit ellipse as latlngs offset from the Sun.
+function orbitEllipseLatLngs(g, key, scale) {
+  const el = KEPLER[key];
+  const T = julianCenturies(currentDate);
+  const a = el.a + el.aD * T, e = el.e + el.eD * T, I = (el.I + el.ID * T) * DEG;
+  const peri = el.peri + el.periD * T, node = el.node + el.nodeD * T;
+  const w = (peri - node) * DEG, om = node * DEG;
+  const cw = Math.cos(w), sw = Math.sin(w), co = Math.cos(om), so = Math.sin(om), ci = Math.cos(I), si = Math.sin(I);
+  const out = [];
+  const N = 200;
+  for (let i = 0; i <= N; i++) {
+    const E = (i / N) * 2 * Math.PI;
+    const xp = a * (Math.cos(E) - e), yp = a * Math.sqrt(1 - e * e) * Math.sin(E);
+    const x = (cw * co - sw * so * ci) * xp + (-sw * co - cw * so * ci) * yp;
+    const y = (cw * so + sw * co * ci) * xp + (-sw * so + cw * co * ci) * yp;
+    const z = (sw * si) * xp + (cw * si) * yp;
+    const rAU = Math.sqrt(x * x + y * y + z * z);
+    const lon = Math.atan2(y, x) / DEG, lat = Math.asin(z / rAU) / DEG;
+    const projKm = rAU * Math.cos(lat * DEG) * AU_KM;
+    const bearing = ((angleDeg - lon) % 360 + 360) % 360;
+    out.push(map.containerPointToLatLng(offsetPx(g, g.sunPx, projKm * 1000 * scale, bearing)));
+  }
+  return out;
+}
+function parseDate(s) {
+  if (!s || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return new Date(Date.UTC(1985, 8, 27, 12));
+  const [y, m, d] = s.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d, 12));
+}
+
+// Star comparison ring — only the largest known star (VX Sagittarii).
+const STAR_COMPARISONS = [
+  { name: "VX Sagittarii", ratio: 1520, dia: 1520 * SUN_DIA_KM },
+];
+
+// Proxima Centauri — closest star to the Sun. 4.246 light years.
+const LY_KM = 9.4607e12;
+const PROXIMA = {
+  name: "Proxima Centauri",
+  distLy: 4.246,
+  distKm: 4.246 * 9.4607e12,
+  ratio: 0.1542,                 // ~0.1542x the Sun's diameter
+  dia: 0.1542 * SUN_DIA_KM,
+};
+
+// ── Voyager trajectories — real, date-stamped polylines ─────────────
+// Each probe is a set of knots [date → ecliptic lon, lat, distance(AU)],
+// linearly interpolated in time. Flyby knots are PINNED to the planet's
+// own ephemeris position at closest approach (so the probe meets the planet
+// exactly on the right date); cruise knots ramp toward the known escape
+// asymptote, with empirical distance milestones. Launch knot sits at Earth.
+const VOYAGERS = {
+  voyager1: {
+    name: "Voyager 1", color: "rgb(232,232,236)",
+    lonInf: 255, latInf: 34.9, climbYears: 6,   // heads toward Ophiuchus, 35° N of ecliptic
+    flybys: [
+      { date: "1977-09-05", body: "earth"   },
+      { date: "1979-03-05", body: "jupiter" },
+      { date: "1980-11-12", body: "saturn"  },
+    ],
+    // [date, distance from Sun in AU] — cruise milestones after Saturn,
+    // ending at the last VERIFIED anchor; beyond it the escape asymptote
+    // takes over analytically (r = r₀ + v·Δt, fixed direction).
+    cruise: [["1985-01-01",24],["1990-01-01",40],["2000-01-01",76],
+             ["2012-08-25",121],["2020-01-01",149],["2025-01-01",167]],
+    speedAUyr: 3.57,   // escape speed — ~16.9 km/s toward Ophiuchus
+  },
+  voyager2: {
+    name: "Voyager 2", color: "rgb(232,232,236)",
+    lonInf: 300, latInf: -48, climbYears: 9,    // heads toward Pavo/Sagittarius, 48° S of ecliptic
+    flybys: [
+      { date: "1977-08-20", body: "earth"   },
+      { date: "1979-07-09", body: "jupiter" },
+      { date: "1981-08-25", body: "saturn"  },
+      { date: "1986-01-24", body: "uranus"  },
+      { date: "1989-08-25", body: "neptune" },
+    ],
+    cruise: [["1992-01-01",37],["2000-01-01",60],["2007-01-01",84],
+             ["2018-11-05",119],["2020-01-01",124],["2025-01-01",138]],
+    speedAUyr: 3.13,   // escape speed — ~14.8 km/s toward Pavo/Sagittarius
+  },
+};
+function buildProbe(def) {
+  const knots = [];
+  let last = null;
+  def.flybys.forEach(f => {
+    const d = parseDate(f.date), p = helioPos(f.body, d);
+    const knot = { t: d.getTime(), lon: p.lon, lat: p.lat, rAU: p.rAU };
+    knots.push(knot); last = knot;
+  });
+  // After the final flyby the probe climbs out of the ecliptic GRADUALLY:
+  // ease longitude + latitude from the flyby value to the escape asymptote
+  // over `climbYears`, so there is no corner where the ramp ends.
+  const climbMs = def.climbYears * 365.25 * 86400000;
+  let dLon = def.lonInf - last.lon;
+  while (dLon >  180) dLon -= 360;
+  while (dLon < -180) dLon += 360;
+  def.cruise.forEach(c => {
+    const t = parseDate(c[0]).getTime();
+    const tau = Math.max(0, Math.min(1, (t - last.t) / climbMs));
+    const e = tau * tau * (3 - 2 * tau);           // smoothstep ease-in-out
+    knots.push({ t, lon: last.lon + dLon * e, lat: last.lat + (def.latInf - last.lat) * e, rAU: c[1] });
+  });
+  knots.sort((a, b) => a.t - b.t);
+  // Unwrap longitude so interpolation never jumps across 0/360.
+  for (let i = 1; i < knots.length; i++) {
+    while (knots[i].lon - knots[i-1].lon >  180) knots[i].lon -= 360;
+    while (knots[i].lon - knots[i-1].lon < -180) knots[i].lon += 360;
+  }
+  return { def, knots };
+}
+// Non-uniform Catmull-Rom (Cardinal) component — smooth C1 curve through knots.
+function crComp(p0, p1, p2, p3, t0, t1, t2, t3, t) {
+  const m1 = (p2 - p0) / (t2 - t0);
+  const m2 = (p3 - p1) / (t3 - t1);
+  const h = t2 - t1, u = (t - t1) / h, u2 = u * u, u3 = u2 * u;
+  return (2*u3 - 3*u2 + 1) * p1 + (u3 - 2*u2 + u) * h * m1 + (-2*u3 + 3*u2) * p2 + (u3 - u2) * h * m2;
+}
+// Smoothly-interpolated position at time (ms). null = not yet launched.
+// Passes exactly through every knot, so the flyby pins stay exact.
+function sampleProbe(probe, ms) {
+  const k = probe.knots;
+  if (ms <= k[0].t) return null;
+  if (ms >= k[k.length-1].t) {
+    // Past the last verified anchor: hyperbolic-escape asymptote —
+    // fixed direction, constant speed. Valid indefinitely.
+    const z = k[k.length-1];
+    const years = (ms - z.t) / (365.25 * 86400000);
+    return { lon: z.lon, lat: z.lat, rAU: z.rAU + probe.def.speedAUyr * years };
+  }
+  let i = 0;
+  while (i < k.length - 1 && !(ms >= k[i].t && ms <= k[i+1].t)) i++;
+  const p1 = k[i], p2 = k[i+1], p0 = k[i-1] || p1, p3 = k[i+2] || p2;
+  return {
+    lon: crComp(p0.lon, p1.lon, p2.lon, p3.lon, p0.t, p1.t, p2.t, p3.t, ms),
+    lat: crComp(p0.lat, p1.lat, p2.lat, p3.lat, p0.t, p1.t, p2.t, p3.t, ms),
+    rAU: crComp(p0.rAU, p1.rAU, p2.rAU, p3.rAU, p0.t, p1.t, p2.t, p3.t, ms),
+  };
+}
+const PROBES = [buildProbe(VOYAGERS.voyager1), buildProbe(VOYAGERS.voyager2)];
+
+// ── Halley's Comet (1P/Halley) ──────────────────────────────────────
+// Classical orbital elements (J2000 heliocentric ecliptic). Highly
+// eccentric + retrograde (i = 162°). Position from perihelion time + period.
+const HALLEY = {
+  name: "Halley's Comet", color: "rgb(190,225,235)",
+  a: 17.8341, e: 0.96714, i: 162.262, node: 58.420, peri: 111.333,
+  Tperi: Date.UTC(1986, 1, 9, 11, 0, 0),           // 1986-02-09 perihelion
+};
+HALLEY.periodDays = (Date.UTC(2061, 6, 28) - HALLEY.Tperi) / 86400000;   // anchored on next perihelion (2061)
+// Eccentric anomaly E (rad) → heliocentric ecliptic lon/lat (deg), rAU.
+function eclFromOrbital(el, E) {
+  const e = el.e, a = el.a;
+  const xp = a * (Math.cos(E) - e), yp = a * Math.sqrt(1 - e * e) * Math.sin(E);
+  const w = el.peri * DEG, om = el.node * DEG, I = el.i * DEG;
+  const cw = Math.cos(w), sw = Math.sin(w), co = Math.cos(om), so = Math.sin(om), ci = Math.cos(I), si = Math.sin(I);
+  const x = (cw * co - sw * so * ci) * xp + (-sw * co - cw * so * ci) * yp;
+  const y = (cw * so + sw * co * ci) * xp + (-sw * so + cw * co * ci) * yp;
+  const z = (sw * si) * xp + (cw * si) * yp;
+  const rAU = Math.sqrt(x * x + y * y + z * z);
+  return { lon: ((Math.atan2(y, x) / DEG) % 360 + 360) % 360, lat: Math.asin(z / rAU) / DEG, rAU };
+}
+function halleyPos(date) {
+  let M = ((date.getTime() - HALLEY.Tperi) / 86400000 / HALLEY.periodDays) * 2 * Math.PI;
+  M = ((M % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+  if (M > Math.PI) M -= 2 * Math.PI;
+  let E = M + HALLEY.e * Math.sin(M);                // Kepler, robust for high e
+  for (let i = 0; i < 100; i++) {
+    const dE = (E - HALLEY.e * Math.sin(E) - M) / (1 - HALLEY.e * Math.cos(E));
+    E -= dE; if (Math.abs(dE) < 1e-10) break;
+  }
+  const p = eclFromOrbital(HALLEY, E);
+  p.rKm = p.rAU * AU_KM; p.projKm = p.rAU * Math.cos(p.lat * DEG) * AU_KM;
+  return p;
+}
+
+// Curated city list (only the ten from the Figma design)
+const CITIES = [
+  { name: "Bergen, Norway",     lat: 60.391, lng:  5.322 },
+  { name: "Bodø, Norway",       lat: 67.280, lng: 14.405 },
+  { name: "Oslo, Norway",       lat: 59.913, lng: 10.752 },
+  { name: "Stavanger, Norway",  lat: 58.969, lng:  5.733 },
+  { name: "Tromsø, Norway",     lat: 69.649, lng: 18.956 },
+  { name: "Trondheim, Norway",  lat: 63.430, lng: 10.395 },
+  { name: "Berlin, Germany",    lat: 52.520, lng: 13.405 },
+  { name: "London, England",    lat: 51.507, lng: -0.128 },
+  { name: "Paris, France",      lat: 48.857, lng:  2.351 },
+  { name: "Rome, Italy",        lat: 41.902, lng: 12.496 },
+];
+
+// ── State ───────────────────────────────────────────────────────────
+let sunLatLng = L.latLng(tweaks.lat, tweaks.lng);
+let sunDiameterMeters = tweaks.sunDiameter || 50;
+let currentDate = parseDate(tweaks.orbitDate);
+const angleDeg = 180;  // planets bear south of the sun
+
+// ── Map setup ───────────────────────────────────────────────────────
+const map = L.map("map", {
+  zoomControl: false,
+  attributionControl: true,
+  worldCopyJump: true,
+  scrollWheelZoom: false,   // custom wheel: two-finger scroll pans, ctrl+wheel (pinch) zooms
+  touchZoom: true,          // two-finger drag pans + pinch zooms (follows midpoint)
+  zoomSnap: 0,              // smooth fractional zoom for trackpad pinch
+}).setView([sunLatLng.lat, sunLatLng.lng], 16);
+
+L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png", {
+  attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
+  maxZoom: 19,
+  subdomains: 'abcd',
+}).addTo(map);
+map.attributionControl.setPrefix(false);
+
+// Optional place/street-name overlay (CARTO labels-only tiles), toggleable.
+const labelsLayer = L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png", {
+  maxZoom: 19,
+  subdomains: 'abcd',
+});
+function syncMapLabels() {
+  if (tweaks.showMapLabels) { if (!map.hasLayer(labelsLayer)) labelsLayer.addTo(map); }
+  else if (map.hasLayer(labelsLayer)) map.removeLayer(labelsLayer);
+}
+
+map.dragging.disable();
+map.boxZoom.disable();
+
+const systemLayer = L.layerGroup().addTo(map);
+const mapEl = document.getElementById("map");
+
+// ── Helpers ─────────────────────────────────────────────────────────
+function metersPerLatDeg() { return 111320; }
+function destAt(origin, distM, bearingDeg) {
+  const rad = bearingDeg * Math.PI / 180;
+  const dN = distM * Math.cos(rad);
+  const dE = distM * Math.sin(rad);
+  const lat = origin.lat + dN / metersPerLatDeg();
+  const lng = origin.lng + dE / (metersPerLatDeg() * Math.cos(origin.lat * Math.PI/180));
+  return L.latLng(lat, lng);
+}
+
+function fmtMeters(m) {
+  if (m < 0.01)  return (m * 1000).toFixed(1) + " mm";
+  if (m < 1)     return (m * 100).toFixed(1) + " cm";
+  if (m < 1000)  return m < 10 ? m.toFixed(2) + " m" : groupNum(Math.round(m)) + " m";
+  const km = m / 1000;
+  return km < 10 ? km.toFixed(2) + " km" : km < 1000 ? km.toFixed(1) + " km" : groupNum(Math.round(km)) + " km";
+}
+function groupNum(n) {
+  // Norwegian-style thin space thousands separator (matches Figma "1 234 560")
+  return Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+}
+function fmtKm(km) {
+  // Always write the full number. No "thousand / million / billion".
+  return groupNum(km) + " km";
+}
+function fmtRatio(r) {
+  if (r >= 1e9) return "1 : " + (r/1e9).toFixed(2) + " B";
+  if (r >= 1e6) return "1 : " + (r/1e6).toFixed(2) + " M";
+  if (r >= 1e3) return "1 : " + Math.round(r/1e3).toLocaleString() + " k";
+  return "1 : " + Math.round(r).toLocaleString();
+}
+
+// Build a hover card: a shape (matching the object's on-map look) that
+// sits half outside the frame's left edge, centred on the name; then the
+// name and a short stack of map-scale-only values. rows: [{label, map, real}].
+// "real" (the actual in-space value) only shows when tweaks.showActualMetrics
+// is on, appended dimly in parentheses.
+function shapeMarkup(shape, color, angle) {
+  if (shape === "ring")    return `<div class="hc-ring" style="border-color:${color}"></div>`;
+  if (shape === "diamond") return `<div class="hc-diamond" style="background:${color}"></div>`;
+  if (shape === "v")       return `<svg width="24" height="24" viewBox="-12 -12 24 24" style="transform:rotate(${(angle || 0).toFixed(1)}deg)"><path d="M9 0 L-8 -9 M9 0 L-8 9" stroke="${color}" stroke-width="2.6" fill="none" stroke-linecap="round"/></svg>`;
+  return `<div class="hc-circle" style="background:${color}"></div>`;
+}
+function buildCard({ shape = "circle", color, name, tag, rows, caption, angle }) {
+  const rowsHtml = rows.map(r => {
+    const real = (tweaks.showActualMetrics && r.real) ? ` <span class="hc-real">(${r.real})</span>` : "";
+    return `<div class="hc-row">${r.label}: ${r.map}${real}</div>`;
+  }).join("");
+  const captionHtml = caption ? `<div class="hc-row">${caption}</div>` : "";
+  return `<div class="hc">
+    <div class="hc-name"><div class="hc-shape">${shapeMarkup(shape, color, angle)}</div>${name}${tag ? `<span class="hc-tag">${tag}</span>` : ""}</div>
+    ${rowsHtml}${captionHtml}
+  </div>`;
+}
+
+// Slider math: log scale 0.5..1000
+const SMIN = 0.5, SMAX = 1000;
+function diameterToFraction(d) {
+  const clamped = Math.max(SMIN, Math.min(SMAX, d));
+  return (Math.log10(clamped) - Math.log10(SMIN)) / (Math.log10(SMAX) - Math.log10(SMIN));
+}
+function fractionToDiameter(f) {
+  const t = Math.max(0, Math.min(1, f));
+  return Math.pow(10, Math.log10(SMIN) + t * (Math.log10(SMAX) - Math.log10(SMIN)));
+}
+
+let selectedKey = null;       // key of the currently-labelled orbit (or null)
+let pinnedKey = null;         // key pinned by a click; stays labelled until an outside click
+let pinnedPoint = null;       // latlng to redraw the pinned label at when unhovered
+const orbitRefs = {};          // key → visible leaflet path
+
+// ── Pixel-space geometry ────────────────────────────────────────────
+// To avoid Mercator distortion at high latitudes, every visible shape is
+// constructed in screen-pixel space at the current zoom/pan and converted
+// to latlngs for Leaflet. The map's "move zoom resize" listener re-renders
+// the whole system so the pixel-space layout stays correct.
+function makeGeom() {
+  const sunPx = map.latLngToContainerPoint(sunLatLng);
+  // Measure px/meter along NORTH using a large probe (~111 km) so the
+  // delta stays well above sub-pixel quantization even at low zoom.
+  // Clamp the probe latitude so we don't cross a pole.
+  const probeLat = Math.min(85, Math.max(-85, sunLatLng.lat + 1));
+  const probe = L.latLng(probeLat, sunLatLng.lng);
+  const probePx = map.latLngToContainerPoint(probe);
+  const probeMeters = Math.abs(probeLat - sunLatLng.lat) * 111320;
+  const pxPerMeter = Math.abs(sunPx.y - probePx.y) / probeMeters;
+  return { sunPx, pxPerMeter, size: map.getSize() };
+}
+function offsetPx(g, centerPx, distM, bearingDeg) {
+  const rad = bearingDeg * Math.PI / 180;
+  // bearing: 0 = N (↑ = -y), 90 = E (+x).
+  const dx = distM * g.pxPerMeter * Math.sin(rad);
+  const dy = -distM * g.pxPerMeter * Math.cos(rad);
+  return L.point(centerPx.x + dx, centerPx.y + dy);
+}
+function ringLatLngs(g, centerPx, radiusM) {
+  // Adaptive: ~1 chord per pixel of perimeter, clamped.
+  const rPx = Math.max(0, radiusM * g.pxPerMeter);
+  const N = Math.max(72, Math.min(720, Math.ceil(2 * Math.PI * rPx)));
+  const out = [];
+  for (let i = 0; i <= N; i++) {
+    const a = (i / N) * 2 * Math.PI;
+    const x = centerPx.x + rPx * Math.cos(a);
+    const y = centerPx.y + rPx * Math.sin(a);
+    out.push(map.containerPointToLatLng(L.point(x, y)));
+  }
+  return out;
+}
+function bodyDiscLatLngs(g, centerPx, radiusM) {
+  // Adaptive: more sides at larger pixel radii, clamped.
+  const rPx = Math.max(0, radiusM * g.pxPerMeter);
+  const N = Math.max(24, Math.min(256, Math.ceil(Math.PI * rPx * 1.5)));
+  const out = [];
+  for (let i = 0; i < N; i++) {
+    const a = (i / N) * 2 * Math.PI;
+    const x = centerPx.x + rPx * Math.cos(a);
+    const y = centerPx.y + rPx * Math.sin(a);
+    out.push(map.containerPointToLatLng(L.point(x, y)));
+  }
+  return out;
+}
+// Find the topmost visible point on a ring (smallest y inside the viewport).
+function topVisibleOnRing(g, centerPx, radiusM) {
+  const N = 360;
+  let best = null;
+  for (let i = 0; i < N; i++) {
+    const a = -Math.PI/2 + (i / N) * 2 * Math.PI;
+    const x = centerPx.x + radiusM * g.pxPerMeter * Math.cos(a);
+    const y = centerPx.y + radiusM * g.pxPerMeter * Math.sin(a);
+    if (x >= 0 && x <= g.size.x && y >= 0 && y <= g.size.y) {
+      if (best === null || y < best.y) best = L.point(x, y);
+    }
+  }
+  return best;
+}
+
+let currentGeom = null;
+
+// ── Render ──────────────────────────────────────────────────────────
+function render() {
+  syncMapLabels();
+  systemLayer.clearLayers();
+  for (const k in orbitRefs) delete orbitRefs[k];
+  const scale = sunDiameterMeters / (SUN_DIA_KM * 1000);
+  const g = makeGeom();
+  currentGeom = g;
+
+  // Only the Sun is permanent. Earth, Moon, Pluto and the other planets all
+  // gate on Show planets. (Moon rides with Earth.)
+  const planetsOn = tweaks.showPlanets;
+  const visible = BODIES.filter(b => {
+    if (b.key === "sun") return true;
+    return planetsOn;
+  });
+
+  // Orbit rings — true projected ellipses (visible + invisible hit polyline)
+  visible.forEach(b => {
+    if (b.key === "sun" || b.kind === "moon") return;
+    const rGate = b.dist * 1000 * scale;   // mean-distance proxy for the size gate
+    if (rGate < sunDiameterMeters * 0.5) return;
+    const pts = orbitEllipseLatLngs(g, b.key, scale);
+
+    const visiblePath = L.polyline(pts, {
+      color: "rgb(218,218,218)",
+      weight: selectedKey === b.key ? 2 : 1,
+      opacity: b.kind === "dwarf" ? 0.45 : 0.55,
+      dashArray: "2,5",
+      interactive: false,
+    }).addTo(systemLayer);
+    orbitRefs[b.key] = visiblePath;
+
+    const hit = L.polyline(pts, {
+      color: "#000",
+      weight: 14,
+      opacity: 0,
+      interactive: true,
+    }).addTo(systemLayer);
+    hit.on("mouseover", (e) => onHoverOrbit(b.key, e.latlng));
+    hit.on("mousemove", (e) => onHoverMove(b.key, e.latlng));
+    hit.on("mouseout",  () => onUnhoverOrbit(b.key));
+    hit.on("mousedown", (e) => { L.DomEvent.stopPropagation(e); onClickOrbit(b.key, e.latlng); });
+  });
+
+  // Moon's orbit ring around the Earth (only when planets are on)
+  if (planetsOn) {
+    const earthP = helioPos("earth", currentDate);
+    const earthBearing = ((angleDeg - earthP.lon) % 360 + 360) % 360;
+    const earthPx = offsetPx(g, g.sunPx, earthP.projKm * 1000 * scale, earthBearing);
+    const moonOrbitR = 384400 * 1000 * scale;
+    if (moonOrbitR > sunDiameterMeters * 0.05) {
+      L.polyline(ringLatLngs(g, earthPx, moonOrbitR), {
+        color: "rgb(180,180,188)",
+        weight: 1,
+        opacity: 0.4,
+        dashArray: "2,4",
+        interactive: false,
+      }).addTo(systemLayer);
+    }
+  }
+
+  // Bodies
+  visible.forEach(b => {
+    let posPx, radiusMap;
+    if (b.key === "sun") {
+      posPx = g.sunPx;
+      radiusMap = sunDiameterMeters / 2;
+    } else if (b.kind === "moon") {
+      const earthP = helioPos("earth", currentDate);
+      const earthBearing = ((angleDeg - earthP.lon) % 360 + 360) % 360;
+      const earthPx = offsetPx(g, g.sunPx, earthP.projKm * 1000 * scale, earthBearing);
+      posPx = offsetPx(g, earthPx, b.offset * 1000 * scale, (earthBearing + 90) % 360);
+      radiusMap = Math.max((b.dia * 1000 / 2) * scale, 0.05);
+    } else {
+      const p = helioPos(b.key, currentDate);
+      const bearing = ((angleDeg - p.lon) % 360 + 360) % 360;
+      posPx = offsetPx(g, g.sunPx, p.projKm * 1000 * scale, bearing);
+      radiusMap = Math.max((b.dia * 1000 / 2) * scale, 0.05);
+    }
+    const posLL = map.containerPointToLatLng(posPx);
+
+    // Body disc as polygon — stays round at any latitude
+    const diaPx = radiusMap * g.pxPerMeter * 2;
+    if (diaPx >= 2) {
+      const bodyPath = L.polygon(bodyDiscLatLngs(g, posPx, radiusMap), {
+        color: b.color,
+        fillColor: b.color,
+        fillOpacity: b.key === "sun" ? 0.95 : 0.85,
+        weight: 1,
+        opacity: 1,
+        interactive: true,
+        className: b.key === "sun" ? "sun-disc" : undefined,
+      }).addTo(systemLayer);
+      if (b.kind !== "moon") {
+        bodyPath.on("mouseover", (e) => onHoverOrbit(b.key, e.latlng));
+        bodyPath.on("mousemove", (e) => onHoverMove(b.key, e.latlng));
+        bodyPath.on("mouseout",  () => onUnhoverOrbit(b.key));
+        bodyPath.on("mousedown", (e) => { L.DomEvent.stopPropagation(e); onClickOrbit(b.key, e.latlng); });
+      }
+    }
+
+    // Always-on dot — skipped for the sun once its disc is drawn (it showed
+    // as a little dot in the middle of the disc).
+    if (!(b.key === "sun" && diaPx >= 2)) {
+    const dot = L.circleMarker(posLL, {
+      radius: b.key === "sun" ? 5 : (b.kind === "moon" || b.kind === "dwarf" ? 3 : 4),
+      color: b.color,
+      fillColor: b.color,
+      fillOpacity: 1,
+      weight: 0,
+      interactive: true,
+      className: b.key === "sun" ? "sun-disc" : undefined,
+    }).addTo(systemLayer);
+    if (b.kind !== "moon") {
+      dot.on("mouseover", (e) => onHoverOrbit(b.key, e.latlng));
+      dot.on("mousemove", (e) => onHoverMove(b.key, e.latlng));
+      dot.on("mouseout",  () => onUnhoverOrbit(b.key));
+      dot.on("mousedown", (e) => { L.DomEvent.stopPropagation(e); onClickOrbit(b.key, e.latlng); });
+    }
+    }
+  });
+
+  // Star comparison rings. Behave like planet orbits — 1 px dashed line
+  // with a wider invisible hit polyline that thickens on hover and reveals
+  // a label at the cursor.
+  if (tweaks.showStars) {
+    STAR_COMPARISONS.forEach((s, idx) => {
+      const key = "star:" + idx;
+      const r = (s.dia * 1000 / 2) * scale;
+      const pts = ringLatLngs(g, g.sunPx, r);
+      const visiblePath = L.polyline(pts, {
+        color: "rgb(240,214,104)",
+        weight: selectedKey === key ? 2.5 : 1.5,
+        opacity: 0.8,
+        interactive: false,
+      }).addTo(systemLayer);
+      orbitRefs[key] = visiblePath;
+
+      const hit = L.polyline(pts, {
+        color: "#000",
+        weight: 14,
+        opacity: 0,
+        interactive: true,
+      }).addTo(systemLayer);
+      hit.on("mouseover", (e) => onHoverOrbit(key, e.latlng));
+      hit.on("mousemove", (e) => onHoverMove(key, e.latlng));
+      hit.on("mouseout",  () => onUnhoverOrbit(key));
+      hit.on("mousedown", (e) => { L.DomEvent.stopPropagation(e); onClickOrbit(key, e.latlng); });
+    });
+  } else if (selectedKey && selectedKey.startsWith("star:")) {
+    selectedKey = null;
+  }
+
+  // Proxima Centauri — due west of the Sun, at its scaled distance.
+  if (tweaks.showProxima) {
+    const distMap = PROXIMA.distKm * 1000 * scale;
+    const posPx = offsetPx(g, g.sunPx, distMap, 270);
+    if (posPx.x >= 0 && posPx.x <= g.size.x && posPx.y >= 0 && posPx.y <= g.size.y) {
+      const posLL = map.containerPointToLatLng(posPx);
+      const dot = L.circleMarker(posLL, {
+        radius: 3,
+        color: "rgb(226,226,226)",
+        fillColor: "rgb(226,226,226)",
+        fillOpacity: 1,
+        weight: 0,
+        interactive: true,
+        className: "proxima-mark",
+      }).addTo(systemLayer);
+      dot.on("mouseover", (e) => onHoverOrbit("proxima", e.latlng));
+      dot.on("mousemove", (e) => onHoverMove("proxima", e.latlng));
+      dot.on("mouseout",  () => onUnhoverOrbit("proxima"));
+      dot.on("mousedown", (e) => { L.DomEvent.stopPropagation(e); onClickOrbit("proxima", e.latlng); });
+    }
+  }
+
+  // Voyagers (launched from Earth, hidden when off-screen)
+  renderVoyagers(g);
+
+  // Halley's Comet
+  renderHalley(g);
+
+  // Hover label (cursor-tracked; planets + sun + stars)
+  renderHoverLabel();
+
+  updateScaleReadout(scale);
+}
+
+// ── Hover/select for orbits ────────────────────────────────────────
+function onHoverOrbit(key, latlng) {
+  if (orbitRefs[key]) orbitRefs[key].setStyle({ weight: 2 });
+  // A pinned label only follows clicks now — hovering elsewhere still
+  // highlights the orbit, but must not swap or re-show the label.
+  if (pinnedKey) return;
+  selectedKey = key;
+  if (latlng) hoverPoint = latlng;
+  renderHoverLabel();
+}
+// A click pins the label: it stays up (and its orbit stays highlighted)
+// after the pointer leaves, until the user clicks empty map space.
+function onClickOrbit(key, latlng) {
+  pinnedKey = key;
+  pinnedPoint = latlng;
+  if (orbitRefs[key]) orbitRefs[key].setStyle({ weight: 2 });
+  selectedKey = key;
+  if (latlng) hoverPoint = latlng;
+  renderHoverLabel();
+}
+function onHoverMove(key, latlng) {
+  if (pinnedKey) return;
+  if (selectedKey !== key || !latlng) return;
+  hoverPoint = latlng;
+  if (hoverLabelMarker) hoverLabelMarker.setLatLng(latlng);
+}
+function onUnhoverOrbit(key) {
+  if (key !== pinnedKey && orbitRefs[key]) orbitRefs[key].setStyle({ weight: 1 });
+  if (pinnedKey) return;   // pinned label/highlight stays until an outside click
+  if (selectedKey === key) {
+    selectedKey = null;
+    hoverPoint = null;
+    renderHoverLabel();
+  }
+}
+
+// ── Hover label marker (planets only) ───────────────────────────────
+let hoverLabelMarker = null;
+let hoverPoint = null;
+// Recompute a moving body's current on-map position, so a pinned label can
+// track it (e.g. during playback) instead of staying at the click point.
+function pinnedPositionFor(key, g, scale) {
+  if (!g) return null;
+  if (key === "proxima") {
+    const distMap = PROXIMA.distKm * 1000 * scale;
+    return map.containerPointToLatLng(offsetPx(g, g.sunPx, distMap, 270));
+  }
+  if (key === "halley") {
+    const cur = halleyPos(currentDate);
+    const bearing = ((angleDeg - cur.lon) % 360 + 360) % 360;
+    return map.containerPointToLatLng(offsetPx(g, g.sunPx, cur.projKm * 1000 * scale, bearing));
+  }
+  if (key.startsWith("voyager:")) {
+    const name = key.slice(8);
+    const probe = PROBES.find(p => p.def.name === name);
+    if (!probe) return null;
+    const cur = sampleProbe(probe, currentDate.getTime());
+    if (!cur) return null;
+    return map.containerPointToLatLng(probePointPx(g, scale, cur));
+  }
+  if (key.startsWith("star:")) return null;   // a fixed ring, not a moving point
+  const b = BODIES.find(x => x.key === key);
+  if (!b) return null;
+  if (b.key === "sun") return map.containerPointToLatLng(g.sunPx);
+  let posPx;
+  if (b.kind === "moon") {
+    const earthP = helioPos("earth", currentDate);
+    const earthBearing = ((angleDeg - earthP.lon) % 360 + 360) % 360;
+    const earthPx = offsetPx(g, g.sunPx, earthP.projKm * 1000 * scale, earthBearing);
+    posPx = offsetPx(g, earthPx, b.offset * 1000 * scale, (earthBearing + 90) % 360);
+  } else {
+    const p = helioPos(b.key, currentDate);
+    const bearing = ((angleDeg - p.lon) % 360 + 360) % 360;
+    posPx = offsetPx(g, g.sunPx, p.projKm * 1000 * scale, bearing);
+  }
+  return map.containerPointToLatLng(posPx);
+}
+function renderHoverLabel() {
+  if (hoverLabelMarker) {
+    systemLayer.removeLayer(hoverLabelMarker);
+    hoverLabelMarker = null;
+  }
+  if (!selectedKey || !hoverPoint) return;
+
+  const scale = sunDiameterMeters / (SUN_DIA_KM * 1000);
+  // A pinned label follows its object every render \u2014 including while
+  // time is playing \u2014 instead of staying put at the click point.
+  if (pinnedKey && selectedKey === pinnedKey) {
+    const pos = pinnedPositionFor(selectedKey, currentGeom, scale);
+    if (pos) { hoverPoint = pos; pinnedPoint = pos; }
+  }
+  let html = "";
+
+  if (selectedKey.startsWith("star:")) {
+    const idx = parseInt(selectedKey.slice(5), 10);
+    const s = STAR_COMPARISONS[idx];
+    if (!s || !tweaks.showStars) { selectedKey = null; return; }
+    html = buildCard({
+      shape: "ring",
+      color: "rgb(240,214,104)",
+      name: s.name,
+      rows: [{ label: "Diameter", map: fmtMeters(s.dia * 1000 * scale), real: fmtKm(s.dia) }],
+      caption: `(${s.ratio < 1 ? s.ratio.toLocaleString(undefined, { maximumFractionDigits: 3 }) : s.ratio.toLocaleString()}\u00d7 Diameter of the Sun)`,
+    });
+  } else if (selectedKey.startsWith("voyager:")) {
+    if (!tweaks.showVoyagers) { selectedKey = null; return; }
+    const name = selectedKey.slice(8);
+    const probe = PROBES.find(p => p.def.name === name);
+    if (!probe) { selectedKey = null; return; }
+    const cur = sampleProbe(probe, currentDate.getTime());
+    if (!cur) { selectedKey = null; return; }
+    const rKm = cur.rAU * AU_KM;
+    const heightAU = cur.rAU * Math.sin(cur.lat * DEG);
+    const above = heightAU >= 0;
+    const heightKm = Math.abs(heightAU) * AU_KM;
+    const vKmh = auYrToKmh(probe.def.speedAUyr);
+    html = buildCard({
+      shape: "diamond",
+      color: probe.def.color,
+      name: probe.def.name,
+      rows: [
+        { label: "Distance from Sun", map: fmtMeters(rKm * 1000 * scale), real: fmtKm(rKm) },
+        { label: `${above ? "Above" : "Below"} ecliptic`, map: fmtMeters(heightKm * 1000 * scale), real: fmtKm(heightKm) },
+        { label: "Velocity", map: fmtMapSpeed(vKmh * 1000 * scale), real: fmtActualSpeed(vKmh) },
+      ],
+    });
+  } else if (selectedKey === "halley") {
+    if (!tweaks.showHalley) { selectedKey = null; return; }
+    const cur = halleyPos(currentDate);
+    const rKm = cur.rAU * AU_KM;
+    const heightAU = cur.rAU * Math.sin(cur.lat * DEG);
+    const above = heightAU >= 0;
+    const heightKm = Math.abs(heightAU) * AU_KM;
+    const vKmh = auYrToKmh(Math.sqrt(4 * Math.PI * Math.PI * (2 / cur.rAU - 1 / HALLEY.a)));
+    // Same orientation math as the on-map comet marker, so the card's V
+    // points the same way \u2014 away from the Sun.
+    let angle = 0;
+    if (currentGeom) {
+      const bearing = ((angleDeg - cur.lon) % 360 + 360) % 360;
+      const cometPx = offsetPx(currentGeom, currentGeom.sunPx, cur.projKm * 1000 * scale, bearing);
+      angle = Math.atan2(currentGeom.sunPx.y - cometPx.y, currentGeom.sunPx.x - cometPx.x) * 180 / Math.PI;
+    }
+    html = buildCard({
+      shape: "v",
+      color: HALLEY.color,
+      name: HALLEY.name,
+      angle,
+      rows: [
+        { label: "Distance from Sun", map: fmtMeters(rKm * 1000 * scale), real: fmtKm(rKm) },
+        { label: `${above ? "Above" : "Below"} ecliptic`, map: fmtMeters(heightKm * 1000 * scale), real: fmtKm(heightKm) },
+        { label: "Velocity", map: fmtMapSpeed(vKmh * 1000 * scale), real: fmtActualSpeed(vKmh) },
+      ],
+    });
+  } else if (selectedKey === "proxima") {
+    if (!tweaks.showProxima) { selectedKey = null; return; }
+    html = buildCard({
+      shape: "circle",
+      color: "rgb(226,226,226)",
+      name: PROXIMA.name,
+      rows: [{ label: "Distance from Sun", map: fmtMeters(PROXIMA.distKm * 1000 * scale), real: fmtKm(PROXIMA.distKm) }],
+    });
+  } else {
+    const b = BODIES.find(x => x.key === selectedKey);
+    if (!b) return;
+    if (b.key !== "sun" && !tweaks.showPlanets) { selectedKey = null; return; }
+
+    if (b.key === "sun") {
+      html = buildCard({
+        shape: "circle",
+        color: b.color,
+        name: b.name,
+        rows: [{ label: "Diameter", map: fmtMeters(sunDiameterMeters), real: fmtKm(b.dia) }],
+      });
+    } else {
+      const v = orbitalSpeedKmh(b.key, currentDate);
+      const rows = [
+        { label: "Diameter", map: fmtMeters(b.dia * 1000 * scale), real: fmtKm(b.dia) },
+      ];
+      if (v != null) {
+        rows.push({ label: "Velocity", map: fmtMapSpeed(v * 1000 * scale), real: fmtActualSpeed(v) });
+      }
+      html = buildCard({ shape: "circle", color: b.color, name: b.name, tag: b.tag, rows });
+    }
+  }
+
+  hoverLabelMarker = L.marker(hoverPoint, {
+    interactive: false,
+    icon: L.divIcon({ className: "ms-icon", html, iconSize: [1, 1] }),
+  }).addTo(systemLayer);
+}
+
+function tipFor(b, scale) {
+  if (b.key === "sun") {
+    return `
+      <div style="font-family:var(--display);font-weight:600;font-size:13px;color:${b.color};margin-bottom:4px">${b.name}</div>
+      <div>map diameter: ${fmtMeters(sunDiameterMeters)}</div>
+      <div>real diameter: ${fmtKm(b.dia)}</div>
+    `;
+  }
+  const distMap = b.kind === "moon" ? b.offset * 1000 * scale : b.dist * 1000 * scale;
+  const diaMap = b.dia * 1000 * scale;
+  const distLbl = b.kind === "moon" ? "from earth" : "from sun";
+  return `
+    <div style="font-family:var(--display);font-weight:600;font-size:13px;color:${b.color};margin-bottom:4px">${b.name}${b.tag ? ' <span style="color:rgb(120,120,120);font-size:10px">'+b.tag+'</span>' : ''}</div>
+    <div>${distLbl}: ${fmtMeters(distMap)}</div>
+    <div>map diameter: ${fmtMeters(diaMap)}</div>
+    <div>real diameter: ${fmtKm(b.dia)}</div>
+    <div>real distance: ${fmtKm(b.kind === "moon" ? b.offset : b.dist)}</div>
+  `;
+}
+
+// ── “As small as …” — ~100 familiar objects spanning the 0.5–1000 m scale.
+// The sentence picks the nearest by log-distance to the current sun size.
+// The list lives in the editable file sun-objects.js (loaded before this
+// script). Fallback keeps the app working if that file is missing.
+const SS_OBJECTS = (window.SS_OBJECTS && window.SS_OBJECTS.length)
+  ? window.SS_OBJECTS
+  : [[0.5, "a beach ball"], [50, "an Olympic swimming pool"], [300, "the Eiffel Tower"]];
+function nearestObject(d) {
+  let best = SS_OBJECTS[0], bestErr = Infinity;
+  for (const o of SS_OBJECTS) {
+    const err = Math.abs(Math.log(d / o[0]));
+    if (err < bestErr) { bestErr = err; best = o; }
+  }
+  return best[1];
+}
+const SS_MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+function fmtSentenceDate(d) {
+  return `${d.getUTCDate()} ${SS_MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+}
+function updateScaleReadout(scale) {
+  document.getElementById("ssObj").textContent  = nearestObject(sunDiameterMeters);
+  document.getElementById("ssDate").textContent = fmtSentenceDate(currentDate);
+  document.getElementById("ssPrep").textContent = tweaks.locationPrep || "in";
+  updateSunLatLngDisplay();
+}
+
+// ── Voyagers (gray squares, launched from Earth, hidden when off-screen) ──
+let voyagerLayer = L.layerGroup().addTo(map);
+function probePointPx(g, scale, s) {
+  const projKm = s.rAU * Math.cos(s.lat * DEG) * AU_KM;     // in-plane (ecliptic) distance
+  const bearing = ((angleDeg - s.lon) % 360 + 360) % 360;
+  return offsetPx(g, g.sunPx, projKm * 1000 * scale, bearing);
+}
+// Opacity by ecliptic latitude (angle) — same ±48° mapping the old brightness
+// version used: the plane sits mid-scale, +48° → 90% opaque, −48° → 4%.
+// Constant colour; only the transparency carries height above/below the plane.
+function probeAlpha(lat) {
+  const t = Math.max(0, Math.min(1, (lat + 48) / 96));
+  return 0.04 + t * 0.86;
+}
+function renderVoyagers(g) {
+  voyagerLayer.clearLayers();
+  if (!tweaks.showVoyagers) return;
+
+  const scale = sunDiameterMeters / (SUN_DIA_KM * 1000);
+  const nowMs = currentDate.getTime();
+
+  PROBES.forEach(probe => {
+    const k = probe.knots;
+    const t0 = k[0].t;
+    const tEnd = nowMs;   // asymptote extrapolates indefinitely past the data
+    if (tEnd <= t0) return;   // not launched yet on this date
+
+    const key = "voyager:" + probe.def.name;
+
+    // Full curved path from launch up to the selected date, drawn as short
+    // segments faded by height above/below the ecliptic (constant colour).
+    const STEPS = 120;
+    let prev = null;
+    const trail = [];
+    for (let i = 0; i <= STEPS; i++) {
+      const ms = t0 + (tEnd - t0) * (i / STEPS) + 1;
+      const s = sampleProbe(probe, ms);
+      if (!s) continue;
+      const ll = map.containerPointToLatLng(probePointPx(g, scale, s));
+      trail.push(ll);
+      if (prev) {
+        L.polyline([prev.ll, ll], {
+          color: probe.def.color,
+          weight: 2,
+          opacity: probeAlpha((prev.lat + s.lat) / 2),
+          interactive: false,
+        }).addTo(voyagerLayer);
+      }
+      prev = { ll, lat: s.lat };
+    }
+
+    // One wide invisible hit-line over the whole trail, so hovering
+    // anywhere along the path reveals the label — same behaviour as a
+    // planet's orbit ring.
+    if (trail.length > 1) {
+      const hit = L.polyline(trail, {
+        color: "#000", weight: 14, opacity: 0, interactive: true,
+      }).addTo(voyagerLayer);
+      hit.on("mouseover", (e) => onHoverOrbit(key, e.latlng));
+      hit.on("mousemove", (e) => onHoverMove(key, e.latlng));
+      hit.on("mouseout",  () => onUnhoverOrbit(key));
+      hit.on("mousedown", (e) => { L.DomEvent.stopPropagation(e); onClickOrbit(key, e.latlng); });
+    }
+
+    // Probe marker at the selected date (only if on-screen).
+    const cur = sampleProbe(probe, nowMs);
+    if (!cur) return;
+    const posPx = probePointPx(g, scale, cur);
+    if (posPx.x < 0 || posPx.x > g.size.x || posPx.y < 0 || posPx.y > g.size.y) return;
+    const posLL = map.containerPointToLatLng(posPx);
+
+    const marker = L.marker(posLL, {
+      interactive: true,
+      icon: L.divIcon({
+        className: "ms-icon",
+        html: `<div class="voyager-mark"></div>`,
+        iconSize: [1, 1],
+      }),
+    }).addTo(voyagerLayer);
+    marker.on("mouseover", (e) => onHoverOrbit(key, e.latlng));
+    marker.on("mousemove", (e) => onHoverMove(key, e.latlng));
+    marker.on("mouseout",  () => onUnhoverOrbit(key));
+    marker.on("mousedown", (e) => { L.DomEvent.stopPropagation(e); onClickOrbit(key, e.latlng); });
+  });
+}
+
+// ── Halley's Comet — solid orbit (faded by ecliptic height) + V marker ──
+// Transparency scale anchored to Halley's own ecliptic-height extremes:
+// the lowest point below the plane → 10% opacity (nearly see-through),
+// the highest above → 90% opacity. Colour stays constant.
+const HALLEY_H = (() => {
+  let lo = 1e9, hi = -1e9;
+  for (let i = 0; i < 3600; i++) {
+    const p = eclFromOrbital(HALLEY, (i / 3600) * 2 * Math.PI);
+    const h = p.rAU * Math.sin(p.lat * DEG);   // perpendicular height off ecliptic, AU
+    if (h < lo) lo = h;
+    if (h > hi) hi = h;
+  }
+  return { lo, hi };
+})();
+function halleyAlpha(h) {
+  const t = Math.max(0, Math.min(1, (h - HALLEY_H.lo) / (HALLEY_H.hi - HALLEY_H.lo)));
+  return 0.04 + t * 0.86;                       // 4%..90% opacity
+}
+let halleyLayer = L.layerGroup().addTo(map);
+function renderHalley(g) {
+  halleyLayer.clearLayers();
+  if (!tweaks.showHalley) return;
+  const scale = sunDiameterMeters / (SUN_DIA_KM * 1000);
+
+  // Solid orbit — short segments faded by height above/below the ecliptic.
+  const N = 360;
+  let prev = null;
+  const trail = [];
+  for (let i = 0; i <= N; i++) {
+    const p = eclFromOrbital(HALLEY, (i / N) * 2 * Math.PI);
+    const projKm = p.rAU * Math.cos(p.lat * DEG) * AU_KM;
+    const bearing = ((angleDeg - p.lon) % 360 + 360) % 360;
+    const px = offsetPx(g, g.sunPx, projKm * 1000 * scale, bearing);
+    const ll = map.containerPointToLatLng(px);
+    trail.push(ll);
+    const h = p.rAU * Math.sin(p.lat * DEG);
+    if (prev) {
+      L.polyline([prev.ll, ll], {
+        color: HALLEY.color,
+        weight: 2,
+        opacity: halleyAlpha((prev.h + h) / 2),
+        interactive: false,
+      }).addTo(halleyLayer);
+    }
+    prev = { ll, h };
+  }
+
+  // One wide invisible hit-line over the whole orbit, so hovering
+  // anywhere along the path reveals the label — same as a planet's ring.
+  const hit = L.polyline(trail, {
+    color: "#000", weight: 14, opacity: 0, interactive: true,
+  }).addTo(halleyLayer);
+  hit.on("mouseover", (e) => onHoverOrbit("halley", e.latlng));
+  hit.on("mousemove", (e) => onHoverMove("halley", e.latlng));
+  hit.on("mouseout",  () => onUnhoverOrbit("halley"));
+  hit.on("mousedown", (e) => { L.DomEvent.stopPropagation(e); onClickOrbit("halley", e.latlng); });
+
+  // Comet marker at the selected date — a V whose point faces the Sun.
+  const cur = halleyPos(currentDate);
+  const bearing = ((angleDeg - cur.lon) % 360 + 360) % 360;
+  const cometPx = offsetPx(g, g.sunPx, cur.projKm * 1000 * scale, bearing);
+  if (cometPx.x < 0 || cometPx.x > g.size.x || cometPx.y < 0 || cometPx.y > g.size.y) return;
+  const ang = Math.atan2(g.sunPx.y - cometPx.y, g.sunPx.x - cometPx.x) * 180 / Math.PI;
+  const heightAU = cur.rAU * Math.sin(cur.lat * DEG);
+  const above = heightAU >= 0;
+  const heightKm = Math.abs(heightAU) * AU_KM;
+  const vKmh = auYrToKmh(Math.sqrt(4 * Math.PI * Math.PI * (2 / cur.rAU - 1 / HALLEY.a)));  // vis-viva
+  const c = HALLEY.color;
+  const marker = L.marker(map.containerPointToLatLng(cometPx), {
+    interactive: true,
+    icon: L.divIcon({
+      className: "ms-icon",
+      iconSize: [1, 1],
+      html: `<div class="halley-mark">
+        <div class="v" style="transform:rotate(${ang.toFixed(1)}deg)">
+          <svg width="24" height="24" viewBox="-12 -12 24 24"><path d="M9 0 L-5 -7 M9 0 L-5 7" stroke="${c}" stroke-width="2.4" fill="none" stroke-linecap="round"/></svg>
+        </div>
+      </div>`,
+    }),
+  }).addTo(halleyLayer);
+  marker.on("mouseover", (e) => onHoverOrbit("halley", e.latlng));
+  marker.on("mousemove", (e) => onHoverMove("halley", e.latlng));
+  marker.on("mouseout",  () => onUnhoverOrbit("halley"));
+  marker.on("mousedown", (e) => { L.DomEvent.stopPropagation(e); onClickOrbit("halley", e.latlng); });
+}
+
+// ── Sun handle layer (visible representation when not dragged) ──────
+function updateSunLatLngDisplay() {
+  const el = document.getElementById("ssLoc");
+  if (el) {
+    el.textContent = tweaks.locationName ||
+      `${sunLatLng.lat.toFixed(2)}, ${sunLatLng.lng.toFixed(2)}`;
+  }
+}
+
+// ── Slider interactions ─────────────────────────────────────────────
+const sliderWrap   = document.getElementById("sliderWrap");
+const sliderHandle = document.getElementById("sliderHandle");
+const epStartText  = document.getElementById("epStartText");
+const epEndText    = document.getElementById("epEndText");
+const handleValue  = document.getElementById("handleValue");
+
+function trackBounds() {
+  const r = sliderWrap.getBoundingClientRect();
+  // Track inset matches CSS --sw-gutter (80px desktop, 0 on mobile).
+  // NB: parseFloat("0px") is 0 — don't `|| 80` it away.
+  const parsed = parseFloat(getComputedStyle(sliderWrap).getPropertyValue("--sw-gutter"));
+  const g = Number.isFinite(parsed) ? parsed : 80;
+  return { left: r.left + g, right: r.right - g, width: r.width - 2 * g, top: r.top, height: r.height };
+}
+function positionHandleFromDiameter() {
+  const f = diameterToFraction(sunDiameterMeters);
+  const b = trackBounds();
+  const wrapL = sliderWrap.getBoundingClientRect().left;
+  const px = (b.left - wrapL) + f * b.width;
+  sliderHandle.style.left = px + "px";
+  // Endpoint fade — 5% threshold either end
+  const fadeStart = f < 0.05 ? (1 - f / 0.05) : 0;
+  const fadeEnd   = f > 0.95 ? (1 - (1 - f) / 0.05) : 0;
+  epStartText.style.opacity = String(1 - fadeStart);
+  epEndText.style.opacity   = String(1 - fadeEnd);
+  // Display value
+  const d = sunDiameterMeters;
+  handleValue.textContent = d < 1 ? (d*100).toFixed(0) + " cm"
+                            : d < 10 ? d.toFixed(1) + " m"
+                            : Math.round(d).toLocaleString() + " m";
+  // Keep the value label inside the page margins while the dot still reaches
+  // the ends: shift the label by however far it would overflow 20px margins.
+  const pad = 20;
+  const half = handleValue.offsetWidth / 2;
+  const centerVp = wrapL + px;                 // label/circle centre in viewport
+  const clamped = Math.max(pad + half, Math.min(window.innerWidth - pad - half, centerVp));
+  handleValue.style.transform = `translateX(${(clamped - centerVp).toFixed(1)}px)`;
+}
+
+let dragging = false, hoverOnHandle = false;
+sliderHandle.addEventListener("mouseenter", () => {
+  if (!dragging) { sliderHandle.classList.add("hover"); hoverOnHandle = true; }
+});
+sliderHandle.addEventListener("mouseleave", () => {
+  hoverOnHandle = false;
+  if (!dragging) sliderHandle.classList.remove("hover");
+});
+// Pointer events: works for mouse AND touch (mouse-only drag didn't slide on phones).
+sliderHandle.addEventListener("pointerdown", (e) => {
+  if (e.pointerType === "mouse" && e.button !== 0) return;
+  dragging = true;
+  sliderHandle.classList.add("dragging");
+  sliderHandle.classList.add("hover");
+  e.preventDefault();
+});
+window.addEventListener("pointermove", (e) => {
+  if (!dragging) return;
+  const b = trackBounds();
+  const f = Math.max(0, Math.min(1, (e.clientX - b.left) / b.width));
+  sunDiameterMeters = fractionToDiameter(f);
+  positionHandleFromDiameter();
+  render();
+});
+function endSliderDrag() {
+  if (!dragging) return;
+  dragging = false;
+  sliderHandle.classList.remove("dragging");
+  if (!hoverOnHandle) sliderHandle.classList.remove("hover");
+  persistTweak("sunDiameter", sunDiameterMeters);
+}
+window.addEventListener("pointerup", endSliderDrag);
+window.addEventListener("pointercancel", endSliderDrag);
+
+// Press on track jumps the handle, then scrubs
+sliderWrap.addEventListener("pointerdown", (e) => {
+  if (e.target === sliderHandle || sliderHandle.contains(e.target)) return;
+  if (e.pointerType === "mouse" && e.button !== 0) return;
+  const b = trackBounds();
+  if (e.clientY < b.top - 30 || e.clientY > b.top + b.height + 30) return;
+  const f = Math.max(0, Math.min(1, (e.clientX - b.left) / b.width));
+  sunDiameterMeters = fractionToDiameter(f);
+  positionHandleFromDiameter();
+  render();
+  // begin a drag so user can scrub
+  dragging = true;
+  sliderHandle.classList.add("dragging");
+  sliderHandle.classList.add("hover");
+  e.preventDefault();
+});
+
+// ── Location editor (in the scale sentence) ─────────────────────
+const ssPop      = document.getElementById("ssPop");
+const ssLoc      = document.getElementById("ssLoc");
+const locInput   = document.getElementById("locInput");
+const locResults = document.getElementById("locResults");
+
+function openLocPop()  { closeDatePop(); ssPop.classList.add("open"); locInput.value = ""; closeResults(); locInput.focus(); }
+function closeLocPop() { ssPop.classList.remove("open"); closeResults(); }
+ssLoc.addEventListener("click", (e) => {
+  e.stopPropagation();
+  ssPop.classList.contains("open") ? closeLocPop() : openLocPop();
+});
+
+// Keep the field showing the current location (called from drag/persist paths).
+function renderLocList() { updateSunLatLngDisplay(); }
+
+function closeResults() { locResults.classList.remove("open"); locResults.innerHTML = ""; }
+function showStatus(msg) {
+  locResults.innerHTML = `<div class="loc-status">${msg}</div>`;
+  locResults.classList.add("open");
+}
+function showResults(list) {
+  locResults.innerHTML = "";
+  list.forEach(r => {
+    const el = document.createElement("div");
+    el.className = "loc-result";
+    el.innerHTML = `${r.title}<span class="sub">${r.sub}</span>`;
+    el.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      applyLocation(r.lat, r.lng, r.title, r.prep || "in");
+      locInput.blur();
+    });
+    locResults.appendChild(el);
+  });
+  locResults.classList.add("open");
+}
+
+// Move the sun + map to a location. We NEVER display coordinates — the
+// sentence always shows the nearest city/town/village. A direct city/
+// town/village pick keeps its own name ("in X"); coordinates, addresses,
+// POIs and map placements are reverse-geocoded to the closest place ("near X").
+async function applyLocation(lat, lng, name, prep = "in") {
+  sunLatLng = L.latLng(lat, lng);
+  persistTweak("lat", lat);
+  persistTweak("lng", lng);
+  const z = map.getZoom() < 8 ? 12 : map.getZoom();
+  map.flyTo([lat, lng], z, { duration: 0.6 });
+  closeLocPop();
+  if (prep === "in" && name && !/^\s*-?\d/.test(name)) {
+    setLocName(name, "in");                 // a real place name was chosen
+  } else {
+    const city = await nearestCityName(lat, lng);
+    setLocName(city || tweaks.locationName, "near");
+  }
+  render();
+}
+function setLocName(name, prep) {
+  if (!name) return;
+  tweaks.locationName = name;
+  tweaks.locationPrep = prep;
+  persistTweak("locationName", name);
+  persistTweak("locationPrep", prep);
+  updateSunLatLngDisplay();
+  updateScaleReadout();
+}
+function haversineKm(la1, lo1, la2, lo2) {
+  const R = 6371, t = Math.PI / 180;
+  const dLa = (la2 - la1) * t, dLo = (lo2 - lo1) * t;
+  const x = Math.sin(dLa / 2) ** 2 + Math.cos(la1 * t) * Math.cos(la2 * t) * Math.sin(dLo / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(x));
+}
+function nearestBundledCity(lat, lng) {
+  let best = null, bd = Infinity;
+  for (const c of CITIES) {
+    const d = haversineKm(lat, lng, c.lat, c.lng);
+    if (d < bd) { bd = d; best = c; }
+  }
+  return best ? best.name : null;
+}
+// Nearest populated place (city → town → village → …). Online via Nominatim
+// reverse geocoding; falls back to the bundled city list when offline.
+async function nearestCityName(lat, lng) {
+  try {
+    const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=10&addressdetails=1&lat=${lat}&lon=${lng}`,
+                          { headers: { "Accept": "application/json" } });
+    if (r.ok) {
+      const d = await r.json();
+      const a = d.address || {};
+      const place = a.city || a.town || a.village || a.municipality || a.hamlet || a.suburb || a.county;
+      if (place) return a.country ? `${place}, ${a.country}` : place;
+    }
+  } catch (e) { /* offline */ }
+  return nearestBundledCity(lat, lng);
+}
+// Resolve the sun's current coordinates to a place name (used after a map drag).
+async function refreshLocName() {
+  const city = await nearestCityName(sunLatLng.lat, sunLatLng.lng);
+  if (city) setLocName(city, "near");
+}
+
+// Parse "lat, lng" / "lat lng". Returns {lat,lng} or null.
+function parseCoords(s) {
+  const m = s.trim().match(/^\(?\s*(-?\d{1,3}(?:\.\d+)?)\s*[, ]\s*(-?\d{1,3}(?:\.\d+)?)\s*\)?$/);
+  if (!m) return null;
+  const lat = parseFloat(m[1]), lng = parseFloat(m[2]);
+  if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+  return { lat, lng };
+}
+
+// Pick the right preposition for a geocoder hit: in a city/area, on an
+// island/bridge/square, at a street address or point of interest.
+function prepForPlace(d) {
+  const t = `${d.addresstype || ""} ${d.type || ""} ${d.class || ""}`;
+  if (/island|islet|bridge|square|beach|mountain|peak|hill/.test(t)) return "on";
+  if (/city|town|village|hamlet|suburb|municipality|county|state|country|region|borough|quarter|neighbourhood|district|province|continent/.test(t)) return "in";
+  return "at";
+}
+
+let geoSeq = 0;
+async function runSearch(q) {
+  q = q.trim();
+  if (!q) { closeResults(); return; }
+  // 1) Direct coordinates.
+  const c = parseCoords(q);
+  if (c) { applyLocation(c.lat, c.lng, null, "near"); locInput.blur(); return; }
+  // 2) Local quick-match against the bundled city list (instant / offline).
+  const local = CITIES
+    .filter(ci => ci.name.toLowerCase().includes(q.toLowerCase()))
+    .map(ci => ({ title: ci.name, sub: `${ci.lat.toFixed(2)}, ${ci.lng.toFixed(2)}`, lat: ci.lat, lng: ci.lng, prep: "in" }));
+  // 3) Online geocode via OpenStreetMap Nominatim.
+  showStatus("Searching…");
+  const seq = ++geoSeq;
+  let remote = [];
+  try {
+    const res = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&q=${encodeURIComponent(q)}`,
+                            { headers: { "Accept": "application/json" } });
+    if (res.ok) {
+      const data = await res.json();
+      remote = data.map(d => ({
+        title: d.display_name.split(",")[0],
+        sub: d.display_name.split(",").slice(1).join(",").trim() || `${(+d.lat).toFixed(2)}, ${(+d.lon).toFixed(2)}`,
+        lat: +d.lat, lng: +d.lon,
+        prep: prepForPlace(d),
+      }));
+    }
+  } catch (e) { /* offline — fall back to local matches */ }
+  if (seq !== geoSeq) return;                 // superseded by a newer search
+  const seen = new Set(), merged = [];
+  [...local, ...remote].forEach(r => {
+    const k = r.lat.toFixed(2) + "," + r.lng.toFixed(2);
+    if (!seen.has(k)) { seen.add(k); merged.push(r); }
+  });
+  if (merged.length) showResults(merged.slice(0, 8));
+  else showStatus(`No matches for “${q}”.`);
+}
+
+let geoTimer = null;
+locInput.addEventListener("input", () => {
+  const v = locInput.value;
+  clearTimeout(geoTimer);
+  if (parseCoords(v)) { closeResults(); return; }   // apply coords on Enter, not mid-type
+  if (v.trim().length < 3) { closeResults(); return; }
+  geoTimer = setTimeout(() => runSearch(v), 350);
+});
+locInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter")  { e.preventDefault(); clearTimeout(geoTimer); runSearch(locInput.value); }
+  if (e.key === "Escape") { closeLocPop(); locInput.blur(); }
+});
+locInput.addEventListener("focus", () => locInput.select());
+document.addEventListener("click", (e) => {
+  if (!ssPop.contains(e.target) && e.target !== ssLoc) closeLocPop();
+});
+
+// ── Date editor: an invisible native date input overlays the date text ──
+// (no showPicker — it throws inside cross-origin iframes; the overlaid
+// input opens the OS picker on a direct click instead).
+
+// ── Toggles ────────────────────────────────────────────────────────
+function bindToggle(id, key) {
+  const el = document.getElementById(id);
+  el.checked = !!tweaks[key];
+  const row = el.closest(".toggle-row");
+  el.addEventListener("change", () => {
+    tweaks[key] = el.checked;
+    persistTweak(key, el.checked);
+    render();
+    // Freeze the icon at its new resting state (no hover-preview of the
+    // *next* click) until the pointer leaves and comes back.
+    if (row) row.classList.add("settle");
+  });
+  if (row) row.addEventListener("pointerleave", () => row.classList.remove("settle"));
+}
+bindToggle("tShowPlanets",  "showPlanets");
+bindToggle("tShowStars",    "showStars");
+bindToggle("tShowVoyagers", "showVoyagers");
+bindToggle("tShowHalley", "showHalley");
+bindToggle("tShowProxima", "showProxima");
+bindToggle("tShowMapLabels", "showMapLabels");
+bindToggle("tActualMetrics", "showActualMetrics");
+
+// ── Date input + play/pause ────────────────────────────────────────
+const transportBtn = document.getElementById("transportBtn");
+
+// Free-text date parsing: "today"/"tomorrow"/"yesterday" plus anything
+// JS's own Date parser understands ("27 Sep 1985", "1985-09-27", ...).
+// All dates are normalized to 12:00 UTC, matching how they're displayed.
+function todayUTCNoon() {
+  const t = new Date();
+  return new Date(Date.UTC(t.getFullYear(), t.getMonth(), t.getDate(), 12));
+}
+function parseDateText(raw) {
+  const s = (raw || "").trim().toLowerCase();
+  if (!s) return null;
+  if (s === "today")     return todayUTCNoon();
+  if (s === "tomorrow")  return new Date(todayUTCNoon().getTime() + 86400000);
+  if (s === "yesterday") return new Date(todayUTCNoon().getTime() - 86400000);
+  const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (iso) {
+    const d = new Date(Date.UTC(+iso[1], +iso[2] - 1, +iso[3], 12));
+    if (!isNaN(d.getTime()) && d.getUTCFullYear() >= 1 && d.getUTCFullYear() <= 10000) return d;
+    return null;
+  }
+  const parsed = new Date(raw);
+  if (!isNaN(parsed.getTime())) {
+    const d = new Date(Date.UTC(parsed.getFullYear(), parsed.getMonth(), parsed.getDate(), 12));
+    if (d.getUTCFullYear() >= 1 && d.getUTCFullYear() <= 10000) return d;
+  }
+  return null;
+}
+function applyTypedDate(d) {
+  currentDate = d;
+  tweaks.orbitDate = isoOf(d);
+  persistTweak("orbitDate", tweaks.orbitDate);
+  render();
+}
+
+const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+const YEAR_MIN = 1, YEAR_MAX = 10000;
+
+const ssDate       = document.getElementById("ssDate");
+const datePop      = document.getElementById("datePop");
+const calPrev      = document.getElementById("calPrev");
+const calNext      = document.getElementById("calNext");
+const calMonthLabel = document.getElementById("calMonthLabel");
+const calYearLabel  = document.getElementById("calYearLabel");
+const calYearInput  = document.getElementById("calYearInput");
+const calGrid       = document.getElementById("calGrid");
+const calToday      = document.getElementById("calToday");
+
+let calViewYear, calViewMonth; // 0-indexed month, of the calendar's current page
+
+function renderCalendar() {
+  calMonthLabel.textContent = MONTH_NAMES[calViewMonth];
+  calYearLabel.textContent = calViewYear;
+  const selY = currentDate.getUTCFullYear(), selM = currentDate.getUTCMonth(), selD = currentDate.getUTCDate();
+  const today = todayUTCNoon();
+  const firstDow = new Date(Date.UTC(calViewYear, calViewMonth, 1)).getUTCDay();
+  const daysInMonth = new Date(Date.UTC(calViewYear, calViewMonth + 1, 0)).getUTCDate();
+  const daysInPrevMonth = new Date(Date.UTC(calViewYear, calViewMonth, 0)).getUTCDate();
+  const cells = [];
+  for (let i = 0; i < firstDow; i++) {
+    cells.push({ day: daysInPrevMonth - firstDow + 1 + i, other: true });
+  }
+  for (let d = 1; d <= daysInMonth; d++) cells.push({ day: d, other: false });
+  while (cells.length < 42) cells.push({ day: cells.length - firstDow - daysInMonth + 1, other: true });
+
+  calGrid.innerHTML = cells.map(c => {
+    let y = calViewYear, m = calViewMonth;
+    if (c.other) {
+      if (cells.indexOf(c) < firstDow) { m -= 1; if (m < 0) { m = 11; y -= 1; } }
+      else { m += 1; if (m > 11) { m = 0; y += 1; } }
+    }
+    const isSelected = !c.other && y === selY && m === selM && c.day === selD;
+    const isToday = y === today.getUTCFullYear() && m === today.getUTCMonth() && c.day === today.getUTCDate();
+    const outOfRange = y < YEAR_MIN || y > YEAR_MAX;
+    const cls = ["cal-day"];
+    if (c.other) cls.push("other-month");
+    if (isSelected) cls.push("selected");
+    if (isToday && !isSelected) cls.push("today");
+    if (outOfRange) cls.push("out-of-range");
+    return `<button type="button" class="${cls.join(" ")}" data-y="${y}" data-m="${m}" data-d="${c.day}">${c.day}</button>`;
+  }).join("");
+}
+
+function openDatePop() {
+  closeLocPop();
+  datePop.classList.add("open");
+  calViewYear = currentDate.getUTCFullYear();
+  calViewMonth = currentDate.getUTCMonth();
+  calYearInput.classList.remove("open");
+  calYearLabel.style.display = "";
+  renderCalendar();
+}
+function closeDatePop() { datePop.classList.remove("open"); }
+ssDate.addEventListener("click", (e) => {
+  e.stopPropagation();
+  datePop.classList.contains("open") ? closeDatePop() : openDatePop();
+});
+calGrid.addEventListener("click", (e) => {
+  const btn = e.target.closest(".cal-day");
+  if (!btn || btn.classList.contains("out-of-range")) return;
+  const y = +btn.dataset.y, m = +btn.dataset.m, d = +btn.dataset.d;
+  applyTypedDate(new Date(Date.UTC(y, m, d, 12)));
+  closeDatePop();
+});
+calPrev.addEventListener("click", () => {
+  calViewMonth -= 1;
+  if (calViewMonth < 0) { calViewMonth = 11; calViewYear -= 1; }
+  renderCalendar();
+});
+calNext.addEventListener("click", () => {
+  calViewMonth += 1;
+  if (calViewMonth > 11) { calViewMonth = 0; calViewYear += 1; }
+  renderCalendar();
+});
+calYearLabel.addEventListener("click", () => {
+  calYearLabel.style.display = "none";
+  calYearInput.classList.add("open");
+  calYearInput.value = calViewYear;
+  calYearInput.focus();
+  calYearInput.select();
+});
+function commitYearInput() {
+  let y = parseInt(calYearInput.value, 10);
+  if (isNaN(y)) y = calViewYear;
+  y = Math.max(YEAR_MIN, Math.min(YEAR_MAX, y));
+  calViewYear = y;
+  calYearInput.classList.remove("open");
+  calYearLabel.style.display = "";
+  renderCalendar();
+}
+calYearInput.addEventListener("blur", commitYearInput);
+calYearInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); commitYearInput(); }
+  if (e.key === "Escape") { e.preventDefault(); calYearInput.classList.remove("open"); calYearLabel.style.display = ""; }
+});
+calToday.addEventListener("click", () => {
+  applyTypedDate(todayUTCNoon());
+  closeDatePop();
+});
+document.addEventListener("click", (e) => {
+  if (!datePop.contains(e.target) && e.target !== ssDate) closeDatePop();
+});
+
+let playRaf = null;
+let playLastTs = 0;
+const PLAY_MS_PER_DAY = 100;   // 1 day per 100 ms at speed 1
+const SPEED_MULT = { 1: 1, 2: 7 };   // speed-2 runs at 1 week per 100ms
+
+let playState = 0;   // 0 = stopped, 1 = playing speed 1, 2 = playing speed 2
+function setPlayState(s) {
+  playState = s;
+  transportBtn.dataset.state = String(s);
+  transportBtn.setAttribute("aria-label", s === 0 ? "Play" : "Pause");
+}
+function isoOf(d) {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+function startPlay() {
+  if (playRaf) return;
+  playLastTs = 0;
+  const step = (ts) => {
+    if (!playLastTs) playLastTs = ts;
+    const dt = ts - playLastTs;
+    playLastTs = ts;
+    // Advance the date as a continuous quantity (sub-day resolution) so the
+    // animation is smooth instead of one frame per day.
+    const advanceMs = (dt / PLAY_MS_PER_DAY) * 86400000 * (SPEED_MULT[playState] || 1);
+    currentDate = new Date(currentDate.getTime() + advanceMs);
+    // Only sync the input + persist when the displayed date actually changes.
+    const iso = isoOf(currentDate);
+    if (iso !== tweaks.orbitDate) {
+      tweaks.orbitDate = iso;
+    }
+    render();
+    playRaf = requestAnimationFrame(step);
+  };
+  playRaf = requestAnimationFrame(step);
+}
+function stopPlay() {
+  if (!playRaf) return;
+  cancelAnimationFrame(playRaf);
+  playRaf = null;
+  // Snap to the displayed whole-day date on pause so subsequent edits are clean.
+  currentDate = parseDate(tweaks.orbitDate);
+  persistTweak("orbitDate", tweaks.orbitDate);
+  render();
+}
+// Click cycles: stopped → speed 1 (play) → speed 2 (faster) → stopped.
+// After each click, "settle" suppresses the hover-preview of the *next*
+// state until the pointer actually leaves and comes back.
+transportBtn.addEventListener("click", () => {
+  if (playState === 0) {
+    setPlayState(1);
+    startPlay();
+  } else if (playState === 1) {
+    setPlayState(2);
+  } else {
+    setPlayState(0);
+    stopPlay();
+  }
+  transportBtn.classList.add("settle");
+});
+transportBtn.addEventListener("pointerleave", () => {
+  transportBtn.classList.remove("settle");
+});
+
+// ── Map interactions: click to drop sun, space + drag to pan,
+//   middle-mouse (wheel-click) + drag to pan ─────────────────────────
+let spaceHeld = false, middleHeld = false;
+function isTyping(t) { return t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable); }
+function enablePan(reason) {
+  if (reason === "space") spaceHeld = true;
+  if (reason === "middle") middleHeld = true;
+  map.dragging.enable();
+  mapEl.classList.add("pan-mode");
+}
+function disablePan(reason) {
+  if (reason === "space") spaceHeld = false;
+  if (reason === "middle") middleHeld = false;
+  if (spaceHeld || middleHeld) return;
+  map.dragging.disable();
+  mapEl.classList.remove("pan-mode", "dragging");
+}
+window.addEventListener("keydown", (e) => {
+  if (e.code === "Space" && !spaceHeld && !isTyping(e.target)) {
+    enablePan("space"); e.preventDefault();
+  }
+});
+window.addEventListener("keyup", (e) => {
+  if (e.code === "Space") disablePan("space");
+});
+window.addEventListener("blur", () => { disablePan("space"); disablePan("middle"); });
+
+// Middle-mouse drag to pan
+mapEl.addEventListener("mousedown", (e) => {
+  if (e.button === 1) {
+    enablePan("middle");
+    mapEl.classList.add("dragging");
+    e.preventDefault();
+  }
+});
+window.addEventListener("mouseup", (e) => {
+  if (e.button === 1) {
+    mapEl.classList.remove("dragging");
+    disablePan("middle");
+  }
+});
+map.on("mousedown", () => { if (spaceHeld || middleHeld) mapEl.classList.add("dragging"); });
+map.on("mouseup",   () => { if (spaceHeld || middleHeld) mapEl.classList.remove("dragging"); });
+
+// ── Place sun (hold) + set scale (drag) + pan (move early) ──────────
+// Press and HOLD 400ms on empty map to place the sun there; once placed,
+// dragging sets the on-map sun radius (the scale). Moving before the hold
+// elapses pans the map instead. Labels are dismissed on any quick tap.
+const DRAG_THRESH_PX = 5;
+const HOLD_MS = 200;
+let g0 = null;            // active gesture state, or null
+let activePointers = 0;
+
+function setSunLatLng(ll) {
+  sunLatLng = ll;
+}
+function persistSunPosition() {
+  persistTweak("lat", sunLatLng.lat);
+  persistTweak("lng", sunLatLng.lng);
+  refreshLocName();                    // show nearest city, never coordinates
+}
+function cancelGesture() {
+  if (g0 && g0.holdTimer) clearTimeout(g0.holdTimer);
+  g0 = null;
+  mapEl.classList.remove("scaling");
+}
+
+mapEl.addEventListener("pointerdown", (e) => {
+  if (e.pointerType === "mouse" && e.button !== 0) return;   // left button / touch / pen only
+  activePointers++;
+  // A second pointer means a two-finger pan/zoom — abort any gesture.
+  if (activePointers > 1) { cancelGesture(); return; }
+  if (spaceHeld || middleHeld) return;
+  // Let taps on planets/orbits show their label instead of moving the sun —
+  // but never on the sun's own disc, which must stay draggable to rescale it
+  // even when it's grown large enough to cover most of the map.
+  const interactiveHit = e.target.closest && e.target.closest(".leaflet-interactive");
+  if (interactiveHit && !interactiveHit.classList.contains("sun-disc")) return;
+  const startPx = map.mouseEventToContainerPoint(e);
+  g0 = {
+    startPx,
+    startLatLng: map.containerPointToLatLng(startPx),
+    lastClient: { x: e.clientX, y: e.clientY },
+    pointerId: e.pointerId,
+    armed: false,        // true once the 400ms hold has placed the sun
+    scaling: false,      // true once an armed drag is resizing the sun
+    panning: false,      // true if movement began before the hold elapsed
+    holdTimer: setTimeout(() => {
+      if (!g0 || g0.panning) return;
+      // Hold elapsed → place the sun here.
+      g0.armed = true;
+      selectedKey = null; hoverPoint = null;
+      setSunLatLng(g0.startLatLng);
+      mapEl.classList.add("scaling");
+      render();
+    }, HOLD_MS),
+  };
+});
+
+mapEl.addEventListener("pointermove", (e) => {
+  if (!g0 || e.pointerId !== g0.pointerId) return;
+  const px = map.mouseEventToContainerPoint(e);
+  const dpx = Math.hypot(px.x - g0.startPx.x, px.y - g0.startPx.y);
+
+  if (g0.armed) {
+    // Sun is placed — drag distance sets the scale.
+    if (!g0.scaling && dpx < DRAG_THRESH_PX) return;
+    g0.scaling = true;
+    const pxPerMeter = (currentGeom && currentGeom.pxPerMeter) || makeGeom().pxPerMeter;
+    // Cursor sits on the sun's edge: radius = drag distance → diameter = 2·dist.
+    const d = Math.max(SMIN, Math.min(SMAX, 2 * dpx / pxPerMeter));
+    sunDiameterMeters = d;
+    positionHandleFromDiameter();
+    render();
+    e.preventDefault();
+    return;
+  }
+
+  // Not armed yet — early movement means the user wants to pan.
+  if (!g0.panning) {
+    if (dpx < DRAG_THRESH_PX) return;
+    g0.panning = true;
+    clearTimeout(g0.holdTimer);
+    mapEl.classList.add("dragging");
+  }
+  map.panBy([g0.lastClient.x - e.clientX, g0.lastClient.y - e.clientY], { animate: false });
+  g0.lastClient = { x: e.clientX, y: e.clientY };
+  e.preventDefault();
+});
+
+function endGesture(e) {
+  if (g0 && e.pointerId === g0.pointerId) {
+    clearTimeout(g0.holdTimer);
+    if (g0.armed) {
+      persistSunPosition();
+      if (g0.scaling) persistTweak("sunDiameter", sunDiameterMeters);
+    } else if (!g0.panning) {
+      // Quick tap on empty map space — dismiss any pinned/open label.
+      if (orbitRefs[pinnedKey]) orbitRefs[pinnedKey].setStyle({ weight: 1 });
+      pinnedKey = null; pinnedPoint = null;
+      selectedKey = null; hoverPoint = null;
+      render();
+    }
+    g0 = null;
+    mapEl.classList.remove("scaling");
+    mapEl.classList.remove("dragging");
+  }
+  activePointers = Math.max(0, activePointers - 1);
+}
+mapEl.addEventListener("pointerup", endGesture);
+mapEl.addEventListener("pointercancel", endGesture);
+
+// ── Trackpad / wheel: two-finger scroll pans, pinch (ctrl+wheel) zooms ──
+mapEl.addEventListener("wheel", (e) => {
+  if (spaceHeld || middleHeld) return;
+  e.preventDefault();
+  if (e.ctrlKey) {
+    // Pinch gesture → zoom around the cursor.
+    const pt = map.mouseEventToContainerPoint(e);
+    const newZoom = map.getZoom() - e.deltaY * 0.01;
+    map.setZoomAround(pt, Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), newZoom)), { animate: false });
+  } else {
+    // Two-finger scroll → pan.
+    map.panBy([e.deltaX, e.deltaY], { animate: false });
+  }
+}, { passive: false });
+
+// Re-render the whole system on any map movement so the pixel-space layout
+// stays correct after pan/zoom.
+let _renderScheduled = false;
+function scheduleRender() {
+  if (_renderScheduled) return;
+  _renderScheduled = true;
+  requestAnimationFrame(() => { _renderScheduled = false; render(); });
+}
+
+// ── Zoom-gesture handling ───────────────────────────────────────────
+// Every body/orbit is a real Leaflet vector layer with true lat/lng
+// coordinates (not a manually-positioned div), so Leaflet already
+// reprojects/scales them natively during its own zoom transition — the
+// same mechanism tiles use. The old code called scheduleRender() (a full
+// clearLayers + rebuild) on every 'zoom' tick too, which is expensive and
+// couldn't keep up with the gesture, so the redraw visibly lagged behind
+// the tiles and only caught up once the gesture ended.
+//
+// Fix: don't rebuild mid-gesture — let Leaflet's native vector reprojection
+// carry the solar system in lockstep with the tiles, and only run one real
+// render() once the zoom settles (zoomend), to refresh anything that
+// depends on the final zoom level (radius gating, label thresholds, etc).
+//
+// Flip this flag to `false` to revert to the old per-tick full rebuild.
+const ZOOM_LIVE_SCALE = false;
+
+if (ZOOM_LIVE_SCALE) {
+  map.on("move resize", scheduleRender);
+  map.on("zoomend", scheduleRender);
+} else {
+  map.on("move zoom resize", scheduleRender);
+}
+
+// ── Persistence (host edit-mode protocol) ───────────────────────────
+function persistTweak(key, value) {
+  try { window.parent.postMessage({ type: "__edit_mode_set_keys", edits: { [key]: value } }, "*"); } catch (_) {}
+}
+
+const tweaksPanel = document.getElementById("tweaksPanel");
+function openTweaks()  { tweaksPanel.classList.add("open"); }
+function closeTweaks() {
+  tweaksPanel.classList.remove("open");
+  try { window.parent.postMessage({ type: "__edit_mode_dismissed" }, "*"); } catch (_) {}
+}
+window.addEventListener("message", (e) => {
+  const d = e.data || {};
+  if (d.type === "__activate_edit_mode")   openTweaks();
+  if (d.type === "__deactivate_edit_mode") closeTweaks();
+});
+document.getElementById("tweaksClose").addEventListener("click", closeTweaks);
+try { window.parent.postMessage({ type: "__edit_mode_available" }, "*"); } catch (_) {}
+
+// ── Mobile drawer: relocate the toggles in/out at breakpoint ───────
+const MOBILE_Q       = window.matchMedia("(max-width: 768px)");
+const drawer         = document.getElementById("drawer");
+const drawerBackdrop = document.getElementById("drawerBackdrop");
+const hamburger      = document.getElementById("hamburger");
+const slotToggles    = document.getElementById("slotToggles");
+const togglesEl      = document.querySelector(".toggles");
+const headerEl       = document.querySelector(".header");
+
+let isMobileLayout = null;
+function applyLayout(mobile) {
+  if (mobile === isMobileLayout) return;
+  isMobileLayout = mobile;
+  if (mobile) {
+    slotToggles.appendChild(togglesEl);
+  } else {
+    closeDrawer();
+    headerEl.appendChild(togglesEl);
+  }
+  positionHandleFromDiameter();
+}
+function openDrawer() {
+  drawer.classList.add("open");
+  drawerBackdrop.classList.add("open");
+  hamburger.classList.add("open");
+  headerEl.querySelector(".header-left").classList.add("shifted");
+  // Close any open popovers/hover-labels so they don't linger under the drawer.
+  closeLocPop();
+  closeDatePop();
+  selectedKey = null;
+  hoverPoint = null;
+  renderHoverLabel();
+}
+function closeDrawer() {
+  drawer.classList.remove("open");
+  drawerBackdrop.classList.remove("open");
+  hamburger.classList.remove("open");
+  headerEl.querySelector(".header-left").classList.remove("shifted");
+}
+hamburger.addEventListener("click", () => {
+  drawer.classList.contains("open") ? closeDrawer() : openDrawer();
+});
+drawerBackdrop.addEventListener("click", closeDrawer);
+MOBILE_Q.addEventListener("change", (e) => applyLayout(e.matches));
+
+// ── Initial paint ───────────────────────────────────────────────────
+applyLayout(MOBILE_Q.matches);
+renderLocList();
+positionHandleFromDiameter();
+updateSunLatLngDisplay();
+render();
+
+// If the saved location is bare coordinates, resolve it to a place name.
+if (/^\s*-?\d/.test(tweaks.locationName || "")) refreshLocName();
+
+window.addEventListener("resize", () => {
+  positionHandleFromDiameter();
+});
+</script>
+</body>
+</html>
